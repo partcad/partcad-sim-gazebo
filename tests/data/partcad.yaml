@@ -1,0 +1,28 @@
+# A package that reads a world through this plugin, for the tests to use.
+#
+# It declares the plugin as a `local` dependency on the repository this file is
+# in, which is what a user's package declares as a `git` one. That is the point:
+# what is under test is the plugin being used the way a package uses it, and a
+# `path` to the checkout is the same graph a URL would produce without a clone
+# in the middle of every test run.
+#
+# Deliberately unnamed. A root package's `name:` is what it calls itself, and a
+# dependency of it is then addressed under that name -- so naming this one
+# `//test` would put the plugin at `//test/sim-gazebo` while the context
+# registers it at `//sim-gazebo`, and `type: sim-gazebo:world` would resolve to
+# nothing. A package a user writes has that name from where it was imported; a
+# root one has no such thing.
+
+dependencies:
+  sim-gazebo:
+    type: local
+    path: ../..
+
+scenes:
+  warehouse:
+    type: sim-gazebo:world
+    desc: A Gazebo world (SDFormat) used directly as a PartCAD scene
+    path: warehouse.world
+    # A link that states both a visual and a collision shape is built from the
+    # collision one, which is what a simulator resolves contact against.
+    ignoreCollision: false
