@@ -91,15 +91,6 @@ docs:
     pc open --with gazebo warehouse.world   # and look at it
     ```
 
-# What the sandbox that reads and writes a world needs installed.
-#
-# Declared for the package rather than on each file type because it is one
-# answer: OpenCASCADE, which the reader needs for the primitives a world names
-# instead of a mesh and the writer needs to triangulate what it writes. Gazebo
-# is not here and could not be -- see `dockerImage` on the simulation below.
-pythonRequirements:
-  - cadquery-ocp==7.9.3.1.1
-
 export:
   world:
     desc: |
@@ -114,6 +105,14 @@ export:
       function and has nothing to do with this.
     path: export_world.py
     extension: world
+    # OpenCASCADE and nothing else: this is XML and arithmetic, plus the
+    # triangulation of what it writes. No Gazebo is involved in writing a world.
+    # Stated on the implementation rather than on the package so that writing a
+    # world does not pay for a simulator and running one does not pay for a CAD
+    # kernel -- see `dockerImage` on the simulation below, which is how Gazebo
+    # gets here and is not something pip can answer.
+    pythonRequirements:
+      - cadquery-ocp==7.9.3.1.1
     # 'decode: false' -- the exporter walks the assembly envelopes itself.
     # Decoding them into live geometry would keep the tree's shape but drop
     # every node's name and label and bake its placement in, leaving nothing to
@@ -165,6 +164,10 @@ import:
     extension: world
     kinds: [scene]
     noun: world
+    # OpenCASCADE, for the primitives a world names instead of a mesh. No
+    # Gazebo, for the reason the exporter needs none.
+    pythonRequirements:
+      - cadquery-ocp==7.9.3.1.1
     # How many digits the placements coming back are rounded to. Six is a
     # micrometre at millimetre scale, which is finer than any world states.
     precision: 6
