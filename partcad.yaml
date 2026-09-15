@@ -1,0 +1,257 @@
+# The Gazebo plugin for PartCAD: everything PartCAD knows about SDFormat, and
+# the simulator that runs it.
+#
+# Four entry points, one per thing PartCAD can be taught by a package, and all
+# four are about the same format:
+#
+#   export:      write a PartCAD scene out as a `.world` file
+#   import:      read a `.world` file back in as a PartCAD scene
+#   simulation:  run one in Gazebo and say where everything ended up
+#   open:        open one in the Gazebo GUI (`pc open --with gazebo`)
+#
+# They are declared together because they are one piece of knowledge. A reader
+# and a writer of the same format disagree the moment they are maintained apart,
+# and the simulator is what decides what the file has to say in the first place.
+# Until PartCAD 0.8.80 the first, the second and the fourth of these shipped
+# inside the `partcad` wheel; they should not, for the reason the simulator never
+# did -- Gazebo is somebody's program with a release cycle of its own, and
+# SDFormat is Gazebo's. Nothing about either belongs in a CAD tool's wheel.
+#
+# `urdf` is the counter-example and stays in `//builtin/import`: a URDF describes
+# a robot rather than any one engine's world, and ROS, Gazebo, MuJoCo, PyBullet
+# and Isaac all read it.
+
+name: //pub/feature/simulate/gazebo
+desc: Reading, writing, opening and simulating a Gazebo world, in SDFormat.
+
+docs:
+  intro: |
+    [Gazebo](https://gazebosim.org/) describes a simulation world in
+    **SDFormat**, which PartCAD calls `world` after the files it lives in. This
+    package is everything PartCAD knows about that format and the program that
+    reads it.
+
+    A PartCAD scene exports to a `.world` file and a `.world` file imports back
+    as a PartCAD scene, so a world somebody else wrote is a scene you can place
+    parts in, and a scene you built out of parts is a world Gazebo can run.
+
+    `pc sim` runs one under gravity and reports where every model ended up, so
+    that a part or an assembly can state what it is supposed to do -- or not do
+    -- and have that checked. `before` and `after` each carry `time` and a
+    `bodies` object: one entry per model, holding its position `pos` and its
+    orientation `quat` (`w x y z`). Positions are in **millimetres**, PartCAD's
+    unit everywhere, not the metres SDFormat works in -- a validation expression
+    is written by whoever wrote the part, against the numbers that part is drawn
+    in.
+
+    ### Gazebo itself is not a Python package
+
+    Which is the one way this differs from
+    [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco), where
+    `pip install mujoco` is the whole of it. There is no wheel that carries a
+    Gazebo, so the simulation runs it the same two ways `pc open --with gazebo`
+    does: the `gz` on this machine if there is one, and otherwise the official
+    image, which `dockerImage` below names and PartCAD's `docker` sandbox is
+    built from.
+
+    Reading and writing a world are not like that at all. They are XML and
+    arithmetic, no Gazebo is involved, and they run in an ordinary sandbox.
+  usage: |
+    Import this package and name it from the sections that use it:
+
+    ```yaml
+    dependencies:
+      sim-gazebo:
+        type: git
+        url: https://github.com/partcad/partcad-sim-gazebo.git
+
+    scenes:
+      warehouse:
+        # A world somebody else wrote, read as a PartCAD scene.
+        type: sim-gazebo:world
+        path: warehouse.world
+
+    assemblies:
+      stack:
+        type: assy
+        simulate:
+          stands:
+            simulation: sim-gazebo:gazebo
+            offset: [[0, 0, 10], [0, 0, 1], 0]
+            validation: |
+              max(
+                  abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
+                  for name in before["bodies"]
+              ) < 2.0
+    ```
+
+    ```shell
+    pc sim -a stack                         # run it and check the validation
+    pc export -t sim-gazebo:world -S warehouse   # write the scene back out
+    pc open --with gazebo warehouse.world   # and look at it
+    ```
+
+export:
+  world:
+    desc: |
+      SDFormat, the XML Gazebo describes a simulation world in: a `.world` file
+      plus the mesh files it references. It is the format a **scene** is
+      exported to (`pc export -S -t sim-gazebo:world`), and it is handed the
+      assembly *tree* itself rather than the geometry it decodes to
+      (`decode: false`) -- one model per object placed in the scene, named,
+      placed and looked up by what the tree says.
+
+      Not to be confused with the `sdf` *part* type, which is a signed distance
+      function and has nothing to do with this.
+    path: export_world.py
+    extension: world
+    # OpenCASCADE and nothing else: this is XML and arithmetic, plus the
+    # triangulation of what it writes. No Gazebo is involved in writing a world.
+    # Stated on the implementation rather than on the package so that writing a
+    # world does not pay for a simulator and running one does not pay for a CAD
+    # kernel -- see `dockerImage` on the simulation below, which is how Gazebo
+    # gets here and is not something pip can answer.
+    pythonRequirements:
+      - cadquery-ocp==7.9.3.1.1
+    # 'decode: false' -- the exporter walks the assembly envelopes itself.
+    # Decoding them into live geometry would keep the tree's shape but drop
+    # every node's name and label and bake its placement in, leaving nothing to
+    # name, group or place the models by. See 'wrappers/wrapper_export.py' in
+    # PartCAD itself.
+    decode: false
+    # The meshes are written by this exporter itself, so it takes the mesh
+    # options too.
+    tolerance: 0.1
+    angularTolerance: 0.1
+    ascii: false
+    # Write an '<inertial>' for every link, computing one from the solid and
+    # 'density' (kg/m^3) for a part that does not state its own.
+    inertial: true
+    # A scene states where things are, so nothing in it is meant to move: every
+    # model is written '<static>true</static>' unless this is turned off, which
+    # is what the simulation below does.
+    static: true
+    # What makes the file usable rather than what the scene says: a world with
+    # no light renders black, and one with no ground has nothing to stand on.
+    sun: true
+    ground_plane: true
+    # 'world_name' defaults to the object's label, 'mesh_dir' to
+    # '<file stem>_meshes' next to the world file, 'mesh_prefix' to empty (which
+    # makes the mesh references relative to the world file; a Gazebo model
+    # database sets it to 'model://<name>/'), 'version' to the SDFormat version
+    # 'gazebo_common.SDF_VERSION' names, and 'density' to the exporter's own
+    # default.
+    # world_name: <name>
+    # mesh_dir: <directory>
+    # mesh_prefix: <prefix>
+    # version: "1.9"
+    # density: 2700.0
+    # Hand the exporter what the parts report about themselves -- mass, inertia,
+    # friction, colour -- so that it writes those rather than recomputing them
+    # or losing them.
+    properties: true
+
+import:
+  world:
+    desc: |
+      SDFormat, the XML Gazebo describes a simulation world in: models placed in
+      a world, each model holding links. A world is an arrangement of things
+      rather than one product, so it is a scene and never an assembly.
+
+      Reading a world is not running one: this is XML and arithmetic, and no
+      Gazebo installation is involved. Running it is `pc sim`.
+    path: import_world.py
+    extension: world
+    kinds: [scene]
+    noun: world
+    # OpenCASCADE, for the primitives a world names instead of a mesh. No
+    # Gazebo, for the reason the exporter needs none.
+    pythonRequirements:
+      - cadquery-ocp==7.9.3.1.1
+    # How many digits the placements coming back are rounded to. Six is a
+    # micrometre at millimetre scale, which is finer than any world states.
+    precision: 6
+    # How deeply models may nest before the reader stops descending and reports
+    # it. An '<include>' cycle is not what this guards -- an include carries its
+    # own depth and stops at the same limit.
+    max_depth: 16
+    # Build a link from its visual geometry rather than its collision geometry:
+    # true for every link, or a list of the link names it applies to.
+    ignoreCollision: false
+    dropped:
+      joint: "joints (the scene shows the models at their initial pose)"
+      light: lights
+      sensor: sensors
+      plugin: "simulator plugins"
+      actor: actors
+      physics: "physics settings"
+      collision: "collision geometry (kept as parts of its own, but not placed)"
+      visual: "visual geometry (kept as parts of its own, but not placed)"
+      geometry: "shapes PartCAD has no geometry for"
+      include: "included models that could not be resolved"
+
+simulation:
+  gazebo:
+    desc: Run the scene in Gazebo under gravity and report where everything ended up.
+    path: simulate_gazebo.py
+    # The format the scene is handed over in, resolved in this package: the
+    # `export:` entry above is what writes it. PartCAD exports the scene before
+    # this script is started, so this is what decides which exporter runs rather
+    # than anything the script says at runtime.
+    format: world
+    # How that export is asked for. A scene states where things are, so the
+    # exporter writes every model '<static>true</static>' by default -- and a
+    # simulation of a world whose models cannot move has nothing to report. So a
+    # run asks for the opposite. It is stated here, by the plugin, because the
+    # plugin is what knows it.
+    formatOptions:
+      static: false
+    # Where Gazebo comes from on a machine that does not have it.
+    #
+    # Unlike MuJoCo, Gazebo is not a Python package and there is no wheel that
+    # carries one, so `pythonRequirements` cannot answer this the way it answers
+    # everything else here. `dockerImage` says which image the `docker` sandbox
+    # is built from, and this one has `gz` in it; a machine using another
+    # sandbox ignores it and this script looks for `gz` on PATH instead. Either
+    # way it is the same two places `pc open --with gazebo` looks, which is the
+    # point -- one answer to "where is Gazebo on this machine", not two.
+    #
+    # `:latest`, not a pinned tag: a user simulating in Gazebo wants the current
+    # Gazebo, and a pin here would quietly age into a version nobody chose.
+    dockerImage: gazebosim/gz-harmonic:latest
+    # How long, in seconds of simulated time. Ten is long enough for something
+    # that is going to fall over to have fallen over and come to rest.
+    duration: 10.0
+    # Gazebo's own step size unless this says otherwise, in seconds.
+    # timestep: 0.001
+    gravity: [0.0, 0.0, -9.81]
+    # How long to wait, in wall-clock seconds, for the server to answer. A world
+    # is stepped as fast as the machine manages, so this is about the machine
+    # rather than about the simulation.
+    timeout: 300.0
+    # Report where every model is at each of these many evenly spaced instants,
+    # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
+    # which is what a validation reads.
+    samples: 0
+
+open:
+  gazebo:
+    displayName: Gazebo
+    # The simulator's own image for the current Gazebo, and the same one the
+    # simulation above runs in. `--docker-image` is the answer for anyone who
+    # wants another (`osrf/gazebo` for Gazebo Classic, say).
+    image: gazebosim/gz-harmonic:latest
+    # Three generations of one program, newest first: `gz sim` today,
+    # `ign gazebo` in the Ignition years, and `gazebo` for Gazebo Classic.
+    # Whichever the machine has is the one used.
+    binaries: [gz, ign, gazebo]
+    binaryArgs:
+      gz: [sim]
+      ign: [gazebo]
+    macosApps: [Gazebo.app]
+    windowsGlobs: ["Gazebo*/bin/gz.exe"]
+    flatpakId: org.gazebosim.Gazebo
+    # Gazebo reads SDFormat and no other description of an arrangement. A scene
+    # given as anything else -- an MJCF model, above all -- is written out as a
+    # world first, which is `pc export -t world` and so is the daemon's work.
+    sceneType: world
