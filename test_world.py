@@ -54,6 +54,26 @@ WORLD_EXAMPLE = os.path.join(DATA, "warehouse.world")
 STL_EXAMPLE = os.path.join(DATA, "cube.stl")
 
 
+# Naming this package's reader by its full path -- `type: sim-gazebo:world` --
+# has to resolve while the package that declares the object is still loading,
+# because a package's objects are created as part of loading it. PartCAD grew
+# `Context.get_project_from()` for exactly that in partcad/partcad#643; a release
+# without it looks the package up from the root, which is not registered yet,
+# records the object as broken on the way in, and answers None from then on.
+#
+# That is a fact about that PartCAD rather than about anything here, so the
+# tests that build such a package say so and are skipped, while the rest -- the
+# reader, the writer, and every pose and unit in between -- run against any
+# release. A capability probe rather than a version comparison: what matters is
+# whether this PartCAD can do it, and the check stops firing of its own accord
+# the moment a release can.
+RESOLVES_A_PLUGIN_TYPE = hasattr(pc.Context, "get_project_from")
+NEEDS_NEWER_PARTCAD = (
+    "this PartCAD (%s) cannot resolve 'sim-gazebo:world' while the package declaring it loads; "
+    "it needs the 'Context.get_project_from()' fix from partcad/partcad#643" % pc.__version__
+)
+
+
 def dropped_labels():
     """How this package's own declaration words each counter the reader reports.
 
@@ -394,6 +414,9 @@ def world_scene(tmp_path, monkeypatch):
     writes instead is a `git` dependency on the published repository; the graph
     either produces is the same one.
     """
+    if not RESOLVES_A_PLUGIN_TYPE:
+        pytest.skip(NEEDS_NEWER_PARTCAD)
+
     root = tmp_path / "workspace"
     shutil.copytree(DATA, root)
     config = yaml.safe_load(open(root / "partcad.yaml", encoding="utf-8"))
