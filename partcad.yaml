@@ -171,8 +171,9 @@ import:
     # How many digits the placements coming back are rounded to. Six is a
     # micrometre at millimetre scale, which is finer than any world states.
     precision: 6
-    # How deep an '<include>' chain is followed before the reader gives up and
-    # reports it, so that a file including itself is an error and not a hang.
+    # How deeply models may nest before the reader stops descending and reports
+    # it. An '<include>' cycle is not what this guards -- an include carries its
+    # own depth and stops at the same limit.
     max_depth: 16
     # Build a link from its visual geometry rather than its collision geometry:
     # true for every link, or a list of the link names it applies to.
