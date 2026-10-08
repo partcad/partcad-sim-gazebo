@@ -47,19 +47,8 @@ jobs:
       - name: Build
         run: docker build -t "$IMAGE:latest" container
 
-      # What PartCAD's `docker` sandbox does with the image, and the two things
-      # the plugin needs of it: a Python that can make a virtual environment,
-      # and a Gazebo that ROS's setup script puts on PATH.
       - name: Check
-        run: |
-          set -e
-          docker run --rm --entrypoint bash "$IMAGE:latest" -c '
-            set -e
-            python3 -m venv /tmp/sandbox
-            /tmp/sandbox/bin/pip --version
-            source /opt/ros/*/setup.bash
-            gz sim --versions
-          '
+        run: container/check.sh "$IMAGE:latest"
 
   # A job of its own, so that the permission to push packages is granted to
   # nothing that runs on a pull request. It builds again rather than handing an
@@ -77,6 +66,11 @@ jobs:
 
       - name: Build
         run: docker build -t "$IMAGE:latest" container
+
+      # Again, on what is about to be pushed: this is a build of its own, and
+      # the base image or a package can have moved since the job above.
+      - name: Check
+        run: container/check.sh "$IMAGE:latest"
 
       # Through the environment rather than expanded into the script, so that
       # nothing a workflow expression evaluates to is ever read as shell.
