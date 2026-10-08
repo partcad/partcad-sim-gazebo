@@ -468,6 +468,13 @@ def emit(node, parent, pose, state):
         # start falling the moment the world was loaded, which is not what the
         # scene says.
         sub(model, "static", "true")
+    if state["options"]["self_collide"]:
+        # SDFormat's links of one model pass through each other unless the
+        # model says otherwise, and a model here is an assembly: two blocks
+        # stacked in one would have the top one fall straight through the
+        # bottom one. A world that is run asks for this; a scene that only
+        # states where things are has no use for it.
+        sub(model, "self_collide", "true")
 
     if elements:
         emit_link(node, model, gazebo_common.IDENTITY, elements, state)
@@ -544,6 +551,7 @@ def process(path, request):
             "inertial": request.get("inertial", True),
             "density": request.get("density") or DEFAULT_DENSITY,
             "static": request.get("static", True),
+            "self_collide": bool(request.get("self_collide", False)),
         },
         "warnings": warnings,
     }

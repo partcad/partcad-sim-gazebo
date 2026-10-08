@@ -696,6 +696,21 @@ def test_a_scene_is_written_static_with_a_light_and_a_ground_unless_told_otherwi
     assert sdf.find("world/model[@name='cube']/static") is None
 
 
+def test_the_parts_of_a_model_collide_only_when_asked_to(export_world, tmp_path):
+    """SDFormat's links of one model pass through each other unless it says so.
+
+    Which for a stack of blocks exported as one model is the top block falling
+    straight through the bottom one: what a simulation asks for is the opposite.
+    """
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+
+    _result, sdf = exported(export_world, tmp_path / "a.world", root)
+    assert sdf.find("world/model[@name='cube']/self_collide") is None
+
+    _result, sdf = exported(export_world, tmp_path / "b.world", root, static=False, self_collide=True)
+    assert sdf.find("world/model[@name='cube']/self_collide").text == "true"
+
+
 def test_a_single_shape_is_a_world_of_one_model(export_world, tmp_path):
     root = envelope("//p:cube", "cube", b"CUBE", [[0.0, 0.0, 5.0], [0.0, 0.0, 1.0], 0.0])
 

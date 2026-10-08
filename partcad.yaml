@@ -131,6 +131,12 @@ export:
     # model is written '<static>true</static>' unless this is turned off, which
     # is what the simulation below does.
     static: true
+    # Whether the links of one model collide with each other. SDFormat says
+    # they do not unless the model says so, and a model here is an assembly: a
+    # stack of two blocks written as one model has the top one fall straight
+    # through the bottom one. Off for a scene, which only states where things
+    # are; the simulation below turns it on.
+    self_collide: false
     # What makes the file usable rather than what the scene says: a world with
     # no light renders black, and one with no ground has nothing to stand on.
     sun: true
@@ -203,9 +209,11 @@ simulation:
     # exporter writes every model '<static>true</static>' by default -- and a
     # simulation of a world whose models cannot move has nothing to report. So a
     # run asks for the opposite. It is stated here, by the plugin, because the
-    # plugin is what knows it.
+    # plugin is what knows it. For the same reason it asks for the parts of an
+    # assembly to collide with each other, which SDFormat says they do not.
     formatOptions:
       static: false
+      self_collide: true
     # Where Gazebo comes from on a machine that does not have it.
     #
     # Unlike MuJoCo, Gazebo is not a Python package and there is no wheel that
@@ -216,9 +224,20 @@ simulation:
     # way it is the same two places `pc open --with gazebo` looks, which is the
     # point -- one answer to "where is Gazebo on this machine", not two.
     #
-    # `:latest`, not a pinned tag: a user simulating in Gazebo wants the current
-    # Gazebo, and a pin here would quietly age into a version nobody chose.
-    dockerImage: gazebosim/gz-harmonic:latest
+    # OSRF's own ROS image with the simulation stack in it, which is Gazebo
+    # Harmonic -- the official image that carries a Gazebo at all. ROS installs
+    # it off PATH, so this script finds it through ROS's setup script (see
+    # 'ros_environment').
+    #
+    # A distribution rather than ':latest', because ROS images are tagged by
+    # distribution and there is no 'latest' simulation one; Jazzy is the
+    # long-term support release and pairs with Harmonic.
+    dockerImage: ghcr.io/partcad/partcad-sim-gazebo:latest
+    # What this script imports beyond the standard library: numpy draws the
+    # snapshots (see 'snapshot_raster.py'). A sandbox's environment does not see
+    # the numpy the image may have of its own.
+    pythonRequirements:
+      - numpy
     # How long, in seconds of simulated time. Ten is long enough for something
     # that is going to fall over to have fallen over and come to rest.
     duration: 10.0
@@ -233,6 +252,11 @@ simulation:
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
     samples: 0
+    # The two pictures PartCAD asks every run for, of the world before and
+    # after, are not configured here: PartCAD says where they go and where they
+    # are taken from (the scene's own 'render: png:' viewpoint) in the request.
+    # They are drawn on the CPU out of the world file and the pose messages; see
+    # 'snapshot_raster.py' for why not with Gazebo's own renderer.
 
 open:
   gazebo:

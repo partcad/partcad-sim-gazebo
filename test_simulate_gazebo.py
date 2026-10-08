@@ -41,7 +41,7 @@ import simulate_gazebo as sim  # noqa: E402
 
 def test_a_machine_with_no_gazebo_is_told_both_ways_to_get_one(monkeypatch):
     monkeypatch.delenv("PC_GZ", raising=False)
-    monkeypatch.setattr(sim.shutil, "which", lambda _name: None)
+    monkeypatch.setattr(sim.shutil, "which", lambda _name, path=None: None)
 
     with pytest.raises(sim.GazeboMissing) as raised:
         sim.find_gazebo()
@@ -54,7 +54,7 @@ def test_a_machine_with_no_gazebo_is_told_both_ways_to_get_one(monkeypatch):
 def test_the_newest_generation_present_is_the_one_used(monkeypatch):
     """'gz sim' today, 'ign gazebo' before it. A machine may well have both."""
     monkeypatch.delenv("PC_GZ", raising=False)
-    monkeypatch.setattr(sim.shutil, "which", lambda name: "/usr/bin/" + name)
+    monkeypatch.setattr(sim.shutil, "which", lambda name, path=None: "/usr/bin/" + name)
 
     binary, args, topic = sim.find_gazebo()
     assert binary == "/usr/bin/gz"
@@ -64,22 +64,50 @@ def test_the_newest_generation_present_is_the_one_used(monkeypatch):
 
 def test_an_older_generation_is_run_the_way_it_spells_itself(monkeypatch):
     monkeypatch.delenv("PC_GZ", raising=False)
-    monkeypatch.setattr(sim.shutil, "which", lambda name: "/usr/bin/ign" if name == "ign" else None)
+    monkeypatch.setattr(sim.shutil, "which", lambda name, path=None: "/usr/bin/ign" if name == "ign" else None)
 
     binary, args, _topic = sim.find_gazebo()
     assert binary == "/usr/bin/ign"
     assert args == ["gazebo"]
 
 
-def test_an_override_points_at_the_tools_beside_it(monkeypatch):
-    """An installation PATH does not know about is still one installation."""
+def test_an_override_names_the_one_program_both_tools_are_subcommands_of(monkeypatch):
+    """'gz sim' and 'gz topic' are one program; there is no 'topic' beside it."""
     monkeypatch.setenv("PC_GZ", "/opt/gz/bin/gz")
 
     binary, args, topic = sim.find_gazebo()
-    assert (binary, args) == ("/opt/gz/bin/gz", ["sim"])
-    # Beside the server, not whatever 'gz' PATH happens to hold: the point of
-    # the override is that this installation is not the one PATH finds.
-    assert topic == os.path.join("/opt/gz/bin", "topic")
+    assert (binary, args, topic) == ("/opt/gz/bin/gz", ["sim"], "topic")
+
+
+def test_a_gazebo_ros_installed_is_found_through_the_environment_ros_sets_up(monkeypatch):
+    """ROS keeps 'gz' off PATH until its setup script has run, which a container
+    started by anything but its own entrypoint has not."""
+    monkeypatch.delenv("PC_GZ", raising=False)
+    monkeypatch.setattr(sim.shutil, "which", lambda name, path=None: "/ros/bin/gz" if path == "/ros/bin" else None)
+    monkeypatch.setattr(sim, "ros_environment", lambda: {"PATH": "/ros/bin", "GZ_CONFIG_PATH": "/ros/share"})
+
+    (binary, args, topic), environment = sim.locate_gazebo()
+
+    assert (binary, args, topic) == ("/ros/bin/gz", ["sim"], "topic")
+    assert environment["GZ_CONFIG_PATH"] == "/ros/share"
+
+
+def test_a_gazebo_on_path_is_run_in_this_environment(monkeypatch):
+    monkeypatch.delenv("PC_GZ", raising=False)
+    monkeypatch.setattr(sim.shutil, "which", lambda name, path=None: "/usr/bin/" + name)
+
+    _found, environment = sim.locate_gazebo()
+
+    assert environment is None
+
+
+def test_with_neither_the_machine_is_still_told_both_ways_to_get_one(monkeypatch):
+    monkeypatch.delenv("PC_GZ", raising=False)
+    monkeypatch.setattr(sim.shutil, "which", lambda name, path=None: None)
+    monkeypatch.setattr(sim, "ros_environment", lambda: None)
+
+    with pytest.raises(sim.GazeboMissing):
+        sim.locate_gazebo()
 
 
 #
