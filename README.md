@@ -96,6 +96,34 @@ The clock is read out of the messages rather than off the wall, which matters:
 a validation should depend on. Wall-clock time is only the `timeout` that stops a
 run which is not progressing at all.
 
+## Snapshots
+
+PartCAD asks every run for two pictures of the world — one before anything
+moved, one when the time is up — and says where to take them from: the scene's
+own `render: png:` viewpoint (`viewport_origin`, `viewport_up`), the same one
+`pc render` uses, or the corner a rendered part is drawn from when nothing says
+otherwise. This package draws them, writes them into the run directory and
+reports them beside the result:
+
+```json
+{"snapshots": {"before": "snapshot-before.png", "after": "snapshot-after.png"}}
+```
+
+They are what the PartCAD IDE's **Validation → Simulation** tab shows side by
+side, and `pc sim` says where they were written.
+
+They are the world file Gazebo ran, each visual placed where Gazebo's pose
+messages say its model and its link were at the first reading and at the last,
+rasterized on the CPU with numpy (`snapshot_raster.py`, the same file the MuJoCo
+plugin draws with). Not Gazebo's own renderer: that needs a GPU or EGL, which a
+sandbox does not have. Gazebo publishes every pose relative to its parent, and
+names repeat — every visual of a hand-written world may be called `visual` — so
+a pose is taken from the messages only where its name is unique, and from the
+world file otherwise.
+
+A picture that cannot be drawn is a warning, never a failed run: the verdict
+does not depend on it.
+
 ## Where Gazebo comes from
 
 Not from pip — there is no wheel that carries a Gazebo. That is the one way this
@@ -103,14 +131,22 @@ differs from
 [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco), where
 `pip install mujoco` is the whole of it.
 
-So it is found the same two ways `pc open --with gazebo` finds it:
+So it is found in this order:
 
-* the `gz` (or `ign`, or `gazebo`) on this machine, if there is one;
-* otherwise the official image, which `dockerImage` in `partcad.yaml` names and
-  PartCAD's `docker` sandbox is built from.
+* the `gz` (or `ign`) on `PATH`, if there is one;
+* the one a ROS installation put under `/opt/ros/<distro>`, run with the
+  environment ROS's setup script leaves — ROS keeps Gazebo off `PATH` until that
+  script has run;
+* and on a machine with neither, PartCAD's `docker` sandbox builds the run's
+  environment from the image `dockerImage` in `partcad.yaml` names:
+  `osrf/ros:jazzy-simulation`, OSRF's own image with Gazebo Harmonic in it,
+  which is then the second case.
 
-`PC_GZ` names an installation `PATH` does not know about. A machine with neither
-is told which of the two to arrange, rather than shown a traceback.
+`PC_GZ` names an installation `PATH` does not know about. A machine with none of
+these is told which way to arrange one, rather than shown a traceback.
+
+The server and the topic reader are both subcommands of that one program —
+`gz sim` and `gz topic` — and are run as such.
 
 Reading and writing a world are not like that at all. They are XML and
 arithmetic, no Gazebo is involved, and they run in an ordinary PartCAD sandbox
@@ -152,7 +188,9 @@ pytest
 ```
 
 `test_simulate_gazebo.py` needs nothing but the standard library and says why an
-end-to-end run is not among what it checks. `test_world.py` needs `partcad`
+end-to-end run is not among what it checks. `test_snapshot.py` needs numpy, and
+`partcad` for the half that reads a world: it places one by pose messages a real
+`gz topic -e` printed. `test_world.py` needs `partcad`
 installed: the reader and the writer are written against the sandbox contract
 that lives there — `ocp_serialize`, `urdf_common` and `primitive_shapes` — and
 the tests import them the same way a sandbox does.
