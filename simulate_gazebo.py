@@ -54,6 +54,11 @@ for a turn, millimetres for a move, the terms of the ``motion:`` an interface
 declares. Gazebo publishes joint states only for a model that carries its
 JointStatePublisher system, so the world that runs is a copy of the one handed
 over with that system added; see 'plan_joints' and 'JointStream'.
+
+**A partition of its own.** Every run talks to its server in a Gazebo transport
+partition nobody else is in, so that two runs on one machine -- two worlds of
+the same name, which is every pair of runs of one simulation -- do not read
+each other's poses and joints; see 'run_environment'.
 """
 
 import collections
@@ -66,6 +71,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from xml.etree import ElementTree
 
 # 'snapshot_raster' and 'gazebo_common' are this package's, beside this file.
@@ -186,6 +192,55 @@ def locate_gazebo():
         if environment is None:
             raise
         return find_gazebo(environment["PATH"]), environment
+
+
+# The variables gz-transport takes its partition from: 'GZ_PARTITION' since
+# Garden, 'IGN_PARTITION' in the Ignition years. Both are set, to one name, so
+# that whichever generation 'find_gazebo' found reads it. Harmonic ignores the
+# 'IGN_' one without a word about it, which was checked rather than assumed.
+PARTITION_VARIABLES = ("GZ_PARTITION", "IGN_PARTITION")
+
+
+def run_environment(environment=None, token=None):
+    """The environment to run the server and every subscriber in, and its partition.
+
+    Gazebo's transport finds the other end of a topic by asking the network,
+    and answers come from every process in the same *partition* -- which, unless
+    something says otherwise, is one per user per machine. A topic is named
+    after the world ('/world/<name>/pose/info'), and the world after the scene,
+    so two runs of one simulation at once -- 'pc test' running the simulations
+    of a package side by side, or a 'pc sim' beside it -- are two servers
+    publishing on the same topic, and each run's subscriber hears both. Nothing
+    fails: the readings interleave, and a validation passes or fails on poses
+    that were never its own.
+
+    So every run gets a partition of its own, and the server and every client
+    that reads from it are started in it. Named by a random token, not by
+    anything about the run: the run directory is one per object and simulation
+    and so is shared by exactly the two runs that collide, and a process id is
+    unique on one machine but not across sandbox containers, which have one
+    numbering each and may well share a network.
+
+    A partition the user has already set ('GZ_PARTITION', or 'IGN_PARTITION'
+    for the generation that reads that one) is kept as a prefix rather than
+    used as it is: '<theirs>:partcad-<token>'. Taken as it is, it would put
+    every run back into one partition -- the bug this exists to prevent, back
+    for exactly the users careful enough to have set one, who set it in a
+    shell profile to keep their own traffic apart rather than to share it with
+    each run. Nested, their name is still the first thing in it, and the run is
+    still apart from everything, theirs included. What that costs is watching
+    a run live from a client in their partition, which nothing offers today.
+
+    'environment' is the one to start from, None for this process's own; it is
+    copied, never changed. 'token' is for tests.
+    """
+    result = dict(os.environ if environment is None else environment)
+    own = "partcad-%s" % (token or uuid.uuid4().hex[:16])
+    theirs = next((result[name] for name in PARTITION_VARIABLES if result.get(name)), None)
+    partition = "%s:%s" % (theirs, own) if theirs else own
+    for name in PARTITION_VARIABLES:
+        result[name] = partition
+    return result, partition
 
 
 def world_name(path):
@@ -651,8 +706,8 @@ def plan_joints(world, prefix, warnings):
     Returns a 'JointModel' for each, in document order, the publisher of the
     n-th told to publish on '<prefix>/<n>' -- a topic of this run's own rather
     than Gazebo's default, so that nothing has to guess how Gazebo names the
-    topic of a nested model, and so that two runs on one machine do not read
-    each other's joints.
+    topic of a nested model. Two runs on one machine use the same topics and
+    are kept apart by their partitions (see 'run_environment').
 
     A fixed joint is not read: nothing moves there. Nor is a joint of a static
     model, or of a model nested in one: the world says nothing of it moves, so
@@ -734,7 +789,7 @@ def prepare_world(scene_file, warnings):
     world = root if root.tag == "world" else root.find("world")
     if world is None:
         return scene_file, []
-    models = plan_joints(world, "/partcad/%d/joint_state" % os.getpid(), warnings)
+    models = plan_joints(world, "/partcad/joint_state", warnings)
     if not models:
         return scene_file, []
     stem, extension = os.path.splitext(scene_file)
@@ -930,6 +985,9 @@ def fill(reading, streams, warnings, patience=PATIENCE):
 
 def process(path, request):
     (server, server_args, topic_command), environment = locate_gazebo()
+    # What the server and every subscriber run in: this run's own partition.
+    # Not what '_version' runs in, which talks to nobody.
+    run_env, _partition = run_environment(environment)
 
     scene_file = request["scene_file"]
     duration = float(request.get("duration") or 10.0)
@@ -956,7 +1014,7 @@ def process(path, request):
         stderr=subprocess.DEVNULL,
         text=True,
         bufsize=1,
-        env=environment,
+        env=run_env,
     )
     simulator = None
     # The first message and the last, kept whole for the snapshots: a reading
@@ -976,15 +1034,13 @@ def process(path, request):
                     stderr=subprocess.DEVNULL,
                     text=True,
                     bufsize=1,
-                    env=environment,
+                    env=run_env,
                 )
             )
             streams.append(JointStream(model))
             threading.Thread(target=streams[-1].follow, args=(joint_watchers[-1].stdout,), daemon=True).start()
 
-        simulator = subprocess.Popen(
-            command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=environment
-        )
+        simulator = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=run_env)
 
         before = None
         after = None
