@@ -819,6 +819,64 @@ def test_a_single_shape_is_a_world_of_one_model(export_world, tmp_path):
     assert model.find("link/visual") is not None
 
 
+#
+# The scene's world: its gravity and the fluid it is filled with
+#
+
+
+def one_cube():
+    return {"name": "//p:tank", "label": "tank", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+
+
+def test_a_scene_that_states_no_gravity_leaves_gazebo_its_own(export_world, tmp_path):
+    """No '<gravity>' at all, so the file is the one it always was and SDFormat's 9.8 applies."""
+    _result, sdf = exported(export_world, tmp_path / "a.world", one_cube())
+
+    assert sdf.find("world/gravity") is None
+
+
+def test_the_scenes_gravity_is_the_worlds(export_world, tmp_path):
+    _result, sdf = exported(export_world, tmp_path / "a.world", one_cube(), world={"gravity": [0.0, 0.0, -1.62]})
+
+    assert [float(v) for v in sdf.find("world/gravity").text.split()] == [0.0, 0.0, -1.62]
+
+
+def test_a_gravity_given_to_the_export_itself_beats_the_scenes(export_world, tmp_path):
+    _result, sdf = exported(
+        export_world, tmp_path / "a.world", one_cube(), gravity=[0.0, 0.0, -3.72], world={"gravity": [0.0, 0.0, -1.62]}
+    )
+
+    assert [float(v) for v in sdf.find("world/gravity").text.split()] == [0.0, 0.0, -3.72]
+
+
+def test_this_package_states_no_gravity_of_its_own_to_beat_the_scenes_with():
+    """A default in the declaration would be an explicit option in every request."""
+    with open(os.path.join(HERE, "partcad.yaml"), encoding="utf-8") as f:
+        declared = yaml.safe_load(f)
+
+    assert "gravity" not in declared["export"]["world"]
+    assert "gravity" not in declared["simulation"]["gazebo"]
+
+
+def test_a_fluid_is_not_modelled_and_the_export_says_so(export_world, tmp_path):
+    """Gazebo's buoyancy system cannot be written for millimetre meshes; see MEDIUM_NOT_WRITTEN."""
+    medium = {"material": "//pub/std/manufacturing/material/fluid:water", "density": 0.0009991}
+
+    result, sdf = exported(export_world, tmp_path / "a.world", one_cube(), world={"medium": medium})
+
+    assert sdf.find("world/plugin") is None
+    assert any("fluid:water" in warning and "vacuum" in warning for warning in result["warnings"])
+
+
+def test_the_volume_partcad_measured_is_not_reported_as_a_property_sdformat_cannot_state(export_world, tmp_path):
+    """It is handed over beside every shape's mass, for the exporter that buoys a body."""
+    properties = {"//p:cube": {"physics": {"mass": 0.0216, "density": 2700.0, "volume": 8000.0}}}
+
+    result, _sdf = exported(export_world, tmp_path / "a.world", one_cube(), properties=properties)
+
+    assert result["unsupported"] == []
+
+
 def test_the_exporter_needs_a_shape_or_a_scene(export_world, tmp_path):
     with pytest.raises(ValueError, match="needs a shape or a scene"):
         export_world.process(str(tmp_path / "x.world"), {"wrapped": None})

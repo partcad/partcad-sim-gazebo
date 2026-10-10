@@ -51,6 +51,12 @@ shapes and their inertias have to be added up -- which is PartCAD's own
 'mass_properties', the one copy of that arithmetic the URDF and MJCF exporters
 use too. A property PartCAD has and SDFormat has no spelling for is reported
 rather than dropped in silence -- see SDF_STATED.
+
+What the scene says about its *world* arrives in ``request["world"]`` when it
+says anything (see 'wrappers/wrapper_export.py' in PartCAD itself). Its gravity
+is the world's ``<gravity>``. The fluid it is filled with is not written, and
+the export says so -- see 'MEDIUM_NOT_WRITTEN' for why Gazebo's buoyancy system
+is not the straightforward answer it looks like.
 """
 
 import math
@@ -78,6 +84,36 @@ import urdf_common  # noqa: E402
 # Metres per millimetre, for the mesh '<scale>': the meshes are written in
 # millimetres and SDFormat reads mesh coordinates as metres after scaling.
 MESH_SCALE = 1.0 / urdf_common.MM_PER_M
+
+# Why the fluid a scene is filled with is not in the world this writes, which is
+# reported as a warning on every export of a scene that has one.
+#
+# SDFormat has no world-level fluid -- '<atmosphere>' is a temperature and a
+# pressure for sensors, not a density anything is buoyed or dragged by -- and
+# Gazebo's answer is a system, 'gz-sim-buoyancy-system' with a
+# '<uniform_fluid_density>'. It is not written, for two reasons that are each
+# enough on their own:
+#
+#   * On Gazebo Harmonic -- what the image this package names carries -- the
+#     system measures a mesh's volume without its '<scale>'. Every mesh written
+#     here is in millimetres under a scale of 0.001, so each link would be
+#     buoyed by a volume 10^9 times too large and leave the world. Fixed
+#     upstream in gazebosim/gz-sim#3909 (August 2026), in no release this package
+#     can yet assume.
+#   * A world that names any system of its own gets none of Gazebo's defaults:
+#     physics, the scene broadcaster whose poses the simulation reads, user
+#     commands. Writing one means writing all of those too, and keeping that
+#     list in step with Gazebo's own.
+#
+# Viscous drag has no world-level system at all; 'gz-sim-hydrodynamics-system'
+# is per model, with coefficients a scene does not state. So a Gazebo run of a
+# scene filled with water is a run in a vacuum, and says so -- the MuJoCo plugin
+# is the one that models a fluid today.
+MEDIUM_NOT_WRITTEN = (
+    "the scene is filled with %s, which this world does not model: SDFormat has no fluid of its own and "
+    "Gazebo's buoyancy system cannot be written for millimetre meshes on Gazebo Harmonic, so Gazebo runs it in "
+    "a vacuum"
+)
 
 # SDFormat names end up as XML attributes and as scoped names joined by '::',
 # so anything outside this set is replaced.
@@ -117,8 +153,13 @@ SURFACE_PHYSICS = {
 # because it is not lost: it is what the mass, the centre of mass and the
 # inertia of a part that states no mass were worked out from, so the file states
 # it as the '<inertial>' it comes to.
+#
+# 'volume' is not a property of the part at all, but what PartCAD measured its
+# solid to enclose, handed to every exporter for the one that buoys a body in a
+# fluid. This one writes no fluid (see MEDIUM_NOT_WRITTEN), so nothing is lost
+# by not writing it either.
 SDF_STATED = (
-    frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density"))
+    frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "volume"))
     | frozenset(LINK_PHYSICS)
     | frozenset(SURFACE_PHYSICS)
 )
@@ -451,6 +492,18 @@ def add_ground_plane(world):
     sub(material, "diffuse", "0.8 0.8 0.8 1")
 
 
+def gravity_of(request, world):
+    """The ``<gravity>`` to write, in m/s^2, or None to leave Gazebo's own.
+
+    An explicit 'gravity' on this export wins -- it is a decision about this
+    file -- and then the scene's. Neither is defaulted in this package's
+    declaration, and must not be: a default there would be explicit in every
+    request and beat every scene that ever stated a gravity.
+    """
+    gravity = request.get("gravity") or world.get("gravity")
+    return None if not gravity else [float(v) for v in gravity]
+
+
 def process(path, request):
     root = request["wrapped"]
     if not isinstance(root, dict) or not (
@@ -498,6 +551,17 @@ def process(path, request):
     sdf.set("version", str(request.get("version") or gazebo_common.SDF_VERSION))
     world = ElementTree.SubElement(sdf, "world")
     world.set("name", world_name)
+
+    # What the scene says about its world. Nothing at all for one that says
+    # nothing, so that a world written from such a scene is the file it always
+    # was and Gazebo applies its own gravity, SDFormat's [0, 0, -9.8].
+    scene_world = request.get("world") or {}
+    gravity = gravity_of(request, scene_world)
+    if gravity is not None:
+        sub(world, "gravity", " ".join(repr(v) for v in gravity))
+    medium = scene_world.get("medium")
+    if medium:
+        warnings.append(MEDIUM_NOT_WRITTEN % (medium.get("material") or "a fluid"))
 
     # Neither is part of what the scene says; both are what makes the file
     # usable. A world with no light renders black and a world with no ground

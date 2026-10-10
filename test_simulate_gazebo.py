@@ -216,6 +216,39 @@ def test_the_world_name_is_read_out_of_the_file(tmp_path):
     assert sim.world_name(str(path)) == "warehouse"
 
 
+#
+# The gravity a run is under
+#
+
+
+def test_a_world_that_states_no_gravity_runs_under_sdformats_own(tmp_path):
+    path = tmp_path / "scene.world"
+    path.write_text('<sdf version="1.9"><world name="w"/></sdf>', encoding="utf-8")
+
+    assert sim.world_gravity(str(path)) == [0.0, 0.0, -9.8]
+
+
+def test_a_world_runs_under_the_gravity_the_scene_wrote_into_it(tmp_path):
+    path = tmp_path / "scene.world"
+    path.write_text('<sdf version="1.9"><world name="w"><gravity>0 0 -1.62</gravity></world></sdf>', encoding="utf-8")
+
+    assert sim.world_gravity(str(path)) == [0.0, 0.0, -1.62]
+
+
+def test_a_gravity_the_simulation_is_handed_beats_the_scenes_and_is_what_gazebo_loads(tmp_path):
+    """'params: {gravity: ...}' on a 'simulate:' is the explicit, per-run answer.
+
+    Written into the world rather than only reported: the report used to say
+    whatever the request said while Gazebo ran under the file's.
+    """
+    path = tmp_path / "scene.world"
+    path.write_text('<sdf version="1.9"><world name="w"><gravity>0 0 -1.62</gravity></world></sdf>', encoding="utf-8")
+
+    assert sim.world_gravity(str(path), [0.0, 0.0, -3.72]) == [0.0, 0.0, -3.72]
+    assert sim.world_gravity(str(path)) == [0.0, 0.0, -3.72]
+    assert sim.world_name(str(path)) == "w"
+
+
 def test_a_file_that_names_no_world_says_so_rather_than_reading_nothing(tmp_path):
     """Every topic is namespaced under the name, so a wrong one reads silence."""
     path = tmp_path / "scene.world"
