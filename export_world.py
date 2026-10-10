@@ -154,12 +154,13 @@ SURFACE_PHYSICS = {
 # inertia of a part that states no mass were worked out from, so the file states
 # it as the '<inertial>' it comes to.
 #
-# 'volume' is not a property of the part at all, but what PartCAD measured its
-# solid to enclose, handed to every exporter for the one that buoys a body in a
-# fluid. This one writes no fluid (see MEDIUM_NOT_WRITTEN), so nothing is lost
-# by not writing it either.
+# 'volume' and 'centerOfVolume' are not properties of the part at all, but what
+# PartCAD measured its solid to enclose and where, handed to every exporter for
+# the one that buoys a body in a fluid at its centre of buoyancy. This one
+# writes no fluid (see MEDIUM_NOT_WRITTEN), so nothing is lost by not writing
+# them either.
 SDF_STATED = (
-    frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "volume"))
+    frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density", "volume", "centerOfVolume"))
     | frozenset(LINK_PHYSICS)
     | frozenset(SURFACE_PHYSICS)
 )

@@ -242,6 +242,25 @@ with water is a run in a vacuum, and says so;
 [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) is the
 plugin that models a fluid today.
 
+What that means, item by item, for a world written from a scene that names a
+`medium:`:
+
+| | Gazebo, through this package | MuJoCo, through partcad-sim-mujoco |
+| --- | --- | --- |
+| the scene's `gravity:` | modelled: the world's `<gravity>` | modelled |
+| buoyancy (ρ · V · g) | **not modelled** | modelled |
+| at the centre of buoyancy, so a body with its weight low down rights itself | **not modelled** | modelled, in a run |
+| drag (density) and viscous resistance (viscosity) | **not modelled** | modelled |
+| a free surface: floating at a waterline, partly submerged | **not modelled** | **not modelled** |
+| added mass, lift | **not modelled** | **not modelled** |
+
+PartCAD hands this exporter everything buoyancy needs all the same -- each
+shape's measured `volume` and its `centerOfVolume`, the centroid of that volume,
+beside its mass -- so that writing Gazebo's buoyancy system, once a Gazebo that
+scales a mesh's volume can be assumed, needs nothing new from PartCAD. Until
+then the two are counted as stated rather than reported as properties SDFormat
+cannot hold: nothing about the part is lost by a world that has no fluid in it.
+
 ## Tests
 
 ```shell
