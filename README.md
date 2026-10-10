@@ -96,6 +96,16 @@ The clock is read out of the messages rather than off the wall, which matters:
 a validation should depend on. Wall-clock time is only the `timeout` that stops a
 run which is not progressing at all.
 
+Every run has a Gazebo transport **partition** of its own, and the server and
+everything that reads from it are started in it. Gazebo names its topics after
+the world, so two runs of one simulation at once — `pc test` running a
+package's simulations side by side, say — are two servers on the same topics,
+and in one partition each run would hear both: nothing fails, and a validation
+is handed poses that were not its own. A `GZ_PARTITION` you have set (or
+`IGN_PARTITION`, for the generation that reads that one) is kept as the prefix,
+`<yours>:partcad-<random>`, rather than used as it is, which would put every run
+back into one.
+
 ### Joints
 
 A world whose models have joints in them — a hinge, a slide — also says where
@@ -269,8 +279,13 @@ simulation itself uses:
 docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 --entrypoint bash \
     ghcr.io/partcad/partcad-sim-gazebo:latest -c \
     'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \
-     && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py'
+     && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py test_partition.py'
 ```
+
+`test_partition.py` checks the environment each run starts its programs in, with
+nothing but the standard library, and then runs two worlds of one name side by
+side in a real Gazebo and checks that each reports only itself. That last test is
+skipped without a Gazebo, like the ones above.
 
 ## Where this came from
 
