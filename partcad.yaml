@@ -28,9 +28,12 @@ desc: Reading, writing, opening and simulating a Gazebo world, in SDFormat.
 # ships 'mass_properties' in its sandbox contract, which the world writer adds a
 # link's shapes up with. An older PartCAD hands it parts with no mass worked out
 # and no helper to add them up with, and refuses this package rather than write
-# a world of weightless links.
-# TODO: set to the release partcad/partcad#755 lands in, if that is not this one.
-partcad: ">=0.8.169"
+# a world of weightless links. A scene's gravity reaches this exporter only
+# from partcad/partcad#757 on, which an older PartCAD would silently leave out of
+# the world. PartCAD releases on every merge to 'devel', so #755 is expected to
+# ship as 0.8.169 and #757 as 0.8.170.
+# TODO: this must be the release #757 actually lands in; correct it if it is not.
+partcad: ">=0.8.170"
 
 docs:
   intro: |
@@ -64,6 +67,20 @@ docs:
 
     Reading and writing a world are not like that at all. They are XML and
     arithmetic, no Gazebo is involved, and they run in an ordinary sandbox.
+
+    ### Gravity, and the fluid a scene is filled with
+
+    A scene's `gravity:` (m/s^2) is the world's `<gravity>`; a scene that
+    states none gets none, and Gazebo's own `[0, 0, -9.8]`. A run's gravity is,
+    in order: `params: {gravity: ...}` on the `simulate:`, the scene's, then
+    SDFormat's -- neither the export nor the simulation below states a default,
+    because one would beat every scene.
+
+    A scene's `medium:` -- the fluid it is filled with -- is **not** modelled
+    here, and the export warns rather than pretending. Gazebo's buoyancy system
+    ignores a mesh's `<scale>` on Harmonic, which would buoy PartCAD's
+    millimetre meshes by 10^9 times their volume, and naming any system in a
+    world drops all of Gazebo's defaults. The MuJoCo plugin models a fluid.
   usage: |
     Import this package and name it from the sections that use it:
 
@@ -163,10 +180,19 @@ export:
     # mesh_prefix: <prefix>
     # version: "1.9"
     # density: 2700.0
+    #
+    # 'gravity' (m/s^2) writes the world's '<gravity>' over the scene's own.
+    # Left unset, deliberately: the gravity of a scene is the scene's to state
+    # (`gravity:` on the scene), and a value here would be an explicit override
+    # beating every scene that ever stated one. Unset, the world gets the
+    # scene's gravity, or no '<gravity>' -- SDFormat's own -- when it states none.
+    # gravity: [0.0, 0.0, -9.81]
+    #
     # Hand the exporter what the parts report about themselves -- mass, inertia,
     # density, friction, colour, and what PartCAD worked out of what they are
     # made of -- so that it writes those rather than recomputing them or losing
-    # them.
+    # them. It is also what PartCAD hands a scene's world under: its gravity and
+    # the fluid it is filled with.
     properties: true
 
 import:
@@ -255,7 +281,15 @@ simulation:
     duration: 10.0
     # Gazebo's own step size unless this says otherwise, in seconds.
     # timestep: 0.001
-    gravity: [0.0, 0.0, -9.81]
+    #
+    # The gravity to run under, in m/s^2, written into the world before Gazebo
+    # loads it. No default, for the reason the export above has none: the world
+    # already carries the scene's gravity, and a default here would replace it
+    # in every run. (It also used to be reported as what the run was under
+    # without ever reaching Gazebo, which applied SDFormat's 9.8.) A `simulate:`
+    # that wants another for one run says `params: {gravity: [0, 0, -1.62]}`.
+    # gravity: [0.0, 0.0, -9.81]
+    #
     # How long to wait, in wall-clock seconds, for the server to answer. A world
     # is stepped as fast as the machine manages, so this is about the machine
     # rather than about the simulation.

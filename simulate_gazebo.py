@@ -190,6 +190,43 @@ def world_name(path):
     return name
 
 
+# SDFormat's own gravity, in m/s^2: what Gazebo applies to a world that states
+# none, which is what PartCAD writes for a scene that states none.
+SDF_DEFAULT_GRAVITY = (0.0, 0.0, -9.8)
+
+
+def world_gravity(path, gravity=None):
+    """The gravity the world in 'path' runs under, in m/s^2 -- made 'gravity' first, if one is given.
+
+    The world arrives with the scene's gravity in it, or with none, which is
+    Gazebo's own. 'gravity' is what a 'simulate:' passed in 'params' for this
+    one run, and it is the explicit answer that beats the scene's -- so it is
+    written into the file Gazebo is about to load, which is also the file the
+    snapshots are drawn from and the run directory keeps. This package's
+    declaration states no default for it, deliberately: a default would be
+    passed in every request and replace every scene's.
+
+    What is returned is what the run will actually be under, which is what the
+    result reports -- not what was asked for, which is the same number or is
+    nothing at all.
+    """
+    from xml.etree import ElementTree
+
+    tree = ElementTree.parse(path)
+    root = tree.getroot()
+    element = root if root.tag == "world" else root.find("world")
+    if element is None:
+        raise Exception("The world file holds no world: %s" % path)
+    if gravity:
+        node = element.find("gravity")
+        if node is None:
+            node = ElementTree.SubElement(element, "gravity")
+        node.text = " ".join(repr(float(v)) for v in gravity)
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+    text = element.findtext("gravity")
+    return [float(v) for v in text.split()] if text and text.strip() else list(SDF_DEFAULT_GRAVITY)
+
+
 #
 # Reading what the server publishes
 #
@@ -534,6 +571,9 @@ def process(path, request):
     timeout = float(request.get("timeout") or 300.0)
     world = request.get("world_name") or world_name(scene_file)
     topic = "/world/%s/pose/info" % world
+    # Before the server is started, because it is written into the file the
+    # server loads: see 'world_gravity'.
+    gravity = world_gravity(scene_file, request.get("gravity"))
 
     command = [server] + list(server_args) + ["-s", "-r", "-v", "1"]
     timestep = request.get("timestep")
@@ -622,7 +662,10 @@ def process(path, request):
         "world": world,
         "duration": duration,
         "reached": after["time"],
-        "gravity": request.get("gravity"),
+        # What the run was under, out of the file Gazebo loaded. It used to be
+        # whatever the request said, which was this package's own default and
+        # not a number Gazebo was ever given.
+        "gravity": gravity,
         "units": "mm",
     }
     if trace:
