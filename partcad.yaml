@@ -28,9 +28,12 @@ desc: Reading, writing, opening and simulating a Gazebo world, in SDFormat.
 # ships 'mass_properties' in its sandbox contract, which the world writer adds a
 # link's shapes up with. An older PartCAD hands it parts with no mass worked out
 # and no helper to add them up with, and refuses this package rather than write
-# a world of weightless links.
-# TODO: set to the release partcad/partcad#755 lands in, if that is not this one.
-partcad: ">=0.8.169"
+# a world of weightless links. A scene's gravity reaches this exporter only
+# from partcad/partcad#757 on, which an older PartCAD would silently leave out of
+# the world. PartCAD releases on every merge to 'devel', so #755 is expected to
+# ship as 0.8.169 and #757 as 0.8.170.
+# TODO: this must be the release #757 actually lands in; correct it if it is not.
+partcad: ">=0.8.170"
 
 docs:
   intro: |
