@@ -868,9 +868,13 @@ def test_a_fluid_is_not_modelled_and_the_export_says_so(export_world, tmp_path):
     assert any("fluid:water" in warning and "vacuum" in warning for warning in result["warnings"])
 
 
-def test_the_volume_partcad_measured_is_not_reported_as_a_property_sdformat_cannot_state(export_world, tmp_path):
+def test_where_partcad_measured_a_solid_is_not_reported_as_a_property_sdformat_cannot_state(export_world, tmp_path):
     """It is handed over beside every shape's mass, for the exporter that buoys a body."""
-    properties = {"//p:cube": {"physics": {"mass": 0.0216, "density": 2700.0, "volume": 8000.0}}}
+    properties = {
+        "//p:cube": {
+            "physics": {"mass": 0.0216, "density": 2700.0, "volume": 8000.0, "centerOfVolume": [0.0, 0.0, 0.0]}
+        }
+    }
 
     result, _sdf = exported(export_world, tmp_path / "a.world", one_cube(), properties=properties)
 
