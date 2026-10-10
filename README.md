@@ -163,7 +163,7 @@ of one `simulate:` entry (per simulation).
 | --- | --- | --- |
 | `duration` | `10.0` | Seconds of simulated time to run for. |
 | `timestep` | Gazebo's | Integration step, in seconds. |
-| `gravity` | `[0, 0, -9.81]` | m/s², in the scene's frame. |
+| `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run, by writing it into the world before Gazebo loads it; unset, the run is under the scene's, or SDFormat's `[0, 0, -9.8]` when the scene states none. |
 | `timeout` | `300.0` | Wall-clock seconds to wait for the server before giving up. |
 | `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`. |
 
@@ -203,6 +203,44 @@ the export says so.
 
 It needs the PartCAD that does this, and says so: `partcad:` in `partcad.yaml`
 makes an older one refuse the package.
+
+## Gravity, and the fluid a scene is filled with
+
+A PartCAD scene may say what its world is like, beside where things are in it:
+its `gravity:` in m/s², and the `medium:` it is filled with, as a reference to a
+material (`//pub/std/manufacturing/material/fluid:water`).
+
+**Gravity** is the world's `<gravity>`. A scene that states none gets no
+`<gravity>` element, so Gazebo applies SDFormat's own `[0, 0, -9.8]` exactly as
+it always did. Which one a run uses is, in order: a `simulate:`'s own
+`params: {gravity: ...}`, written into the world before Gazebo loads it; the
+scene's; SDFormat's. An explicit `gravity` on the `world` export does the same
+for a file written with `pc export`. Neither this package's export nor its
+simulation states a default of its own, because one would beat every scene that
+does. A run reports the gravity it was actually under, read out of the world it
+ran.
+
+**A fluid is not modelled**, and the export says so in a warning rather than
+writing a world that pretends otherwise. SDFormat has no world-level fluid —
+`<atmosphere>` is a temperature and a pressure for sensors — and Gazebo's answer,
+the `gz-sim-buoyancy-system` with a `<uniform_fluid_density>`, is not the
+straightforward fit it looks like:
+
+* On **Gazebo Harmonic**, the release the image above carries, it measures a
+  mesh's volume without its `<scale>`. Every mesh PartCAD writes is in
+  millimetres under a scale of 0.001, so every link would be buoyed by a volume
+  10⁹ times too large. It is fixed upstream in
+  [gazebosim/gz-sim#3909](https://github.com/gazebosim/gz-sim/pull/3909), in no
+  release this package can assume yet.
+* A world that names **any** system of its own gets none of Gazebo's defaults —
+  physics, user commands, and the scene broadcaster whose poses a run reads — so
+  writing one means writing all of those as well, and keeping that list in step
+  with Gazebo's.
+
+Viscous drag has no world-level system at all. So a Gazebo run of a scene filled
+with water is a run in a vacuum, and says so;
+[partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) is the
+plugin that models a fluid today.
 
 ## Tests
 
