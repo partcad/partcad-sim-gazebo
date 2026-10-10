@@ -20,7 +20,7 @@ part, against the numbers that part is drawn in.
 
 **Where Gazebo comes from.** Not from pip: there is no wheel that carries a
 Gazebo, which is the one way this differs from the MuJoCo plugin. So it is found
-the same two ways ``pc open --with gazebo`` finds it -- the ``gz`` on this
+the same two ways ``pc ide open --with gazebo`` finds it -- the ``gz`` on this
 machine, and otherwise the official image, which ``dockerImage`` in
 ``partcad.yaml`` names and PartCAD's ``docker`` sandbox is built from. Either way
 the binary is on ``PATH`` by the time this runs, and a machine with neither is
@@ -69,7 +69,7 @@ MM_PER_M = 1000.0
 # The programs that are a Gazebo, newest first, what each one calls the
 # subcommand that runs a server, and what it calls the one that prints a topic.
 # Both are subcommands of the one program -- 'gz sim', 'gz topic' -- not programs
-# of their own. The same table `open:` in 'partcad.yaml' declares for `pc open`,
+# of their own. The same table `open:` in 'partcad.yaml' declares for `pc ide open`,
 # for the same reason: one answer to "is there a Gazebo on this machine",
 # whichever generation of it is installed.
 SERVERS = (

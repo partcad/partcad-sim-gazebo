@@ -7,7 +7,7 @@
 #   export:      write a PartCAD scene out as a `.world` file
 #   import:      read a `.world` file back in as a PartCAD scene
 #   simulation:  run one in Gazebo and say where everything ended up
-#   open:        open one in the Gazebo GUI (`pc open --with gazebo`)
+#   open:        open one in the Gazebo GUI (`pc ide open --with gazebo`)
 #
 # They are declared together because they are one piece of knowledge. A reader
 # and a writer of the same format disagree the moment they are maintained apart,
@@ -49,10 +49,10 @@ docs:
     Which is the one way this differs from
     [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco), where
     `pip install mujoco` is the whole of it. There is no wheel that carries a
-    Gazebo, so the simulation runs it the same two ways `pc open --with gazebo`
-    does: the `gz` on this machine if there is one, and otherwise the official
-    image, which `dockerImage` below names and PartCAD's `docker` sandbox is
-    built from.
+    Gazebo, so the simulation runs it the same two ways
+    `pc ide open --with gazebo` does: the `gz` on this machine if there is one,
+    and otherwise the official image, which `dockerImage` below names and
+    PartCAD's `docker` sandbox is built from.
 
     Reading and writing a world are not like that at all. They are XML and
     arithmetic, no Gazebo is involved, and they run in an ordinary sandbox.
@@ -88,7 +88,7 @@ docs:
     ```shell
     pc sim -a stack                         # run it and check the validation
     pc export -t sim-gazebo:world -S warehouse   # write the scene back out
-    pc open --with gazebo warehouse.world   # and look at it
+    pc ide open --with gazebo warehouse.world   # and look at it
     ```
 
 export:
@@ -221,8 +221,8 @@ simulation:
     # everything else here. `dockerImage` says which image the `docker` sandbox
     # is built from, and this one has `gz` in it; a machine using another
     # sandbox ignores it and this script looks for `gz` on PATH instead. Either
-    # way it is the same two places `pc open --with gazebo` looks, which is the
-    # point -- one answer to "where is Gazebo on this machine", not two.
+    # way it is the same two places `pc ide open --with gazebo` looks, which is
+    # the point -- one answer to "where is Gazebo on this machine", not two.
     #
     # OSRF's own ROS image with the simulation stack in it, which is Gazebo
     # Harmonic -- the official image that carries a Gazebo at all. ROS installs
