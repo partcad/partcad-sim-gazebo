@@ -42,9 +42,15 @@ close, and both are the ones the URDF exporter already uses:
 What the part states about itself wins over anything computed here: mass,
 centre of mass, inertia, friction, contact and colour are named PartCAD
 properties, and this writes each of them into the SDFormat element that states
-it. Only a part that says nothing gets computed inertial properties, from its
-solid and the configured density. A property PartCAD has and SDFormat has no
-spelling for is reported rather than dropped in silence -- see SDF_STATED.
+it. A part that states none of them is no different: PartCAD works out its
+mass, centre of mass and inertia from its solid and the density of what it is
+made of (see 'partcad.physics' in PartCAD), and they arrive here in the same
+properties, under the same names, as if the part had stated them. So this writes
+what it is handed and works nothing out, except where a link is made of several
+shapes and their inertias have to be added up -- which is PartCAD's own
+'mass_properties', the one copy of that arithmetic the URDF and MJCF exporters
+use too. A property PartCAD has and SDFormat has no spelling for is reported
+rather than dropped in silence -- see SDF_STATED.
 """
 
 import math
@@ -56,32 +62,22 @@ from xml.etree import ElementTree
 # Pinned before anything that may pull OCP - see the note in ocp_serialize.
 import pyexpat  # noqa: F401
 
-# 'gazebo_common' is this package's, and sits beside this file. The other two
+# 'gazebo_common' is this package's, and sits beside this file. The other three
 # are PartCAD's own and are the sandbox contract every implementation is written
 # against: 'ocp_serialize' is the shape and assembly envelope format this is
-# handed, and 'urdf_common' is the pose arithmetic they are stated in. A sandbox
-# runs a wrapper out of PartCAD's 'wrappers/' directory, so both are already on
-# sys.path by the time this is imported.
+# handed, 'urdf_common' is the pose arithmetic they are stated in, and
+# 'mass_properties' is how several shapes' inertias add up into one link's. A
+# sandbox runs a wrapper out of PartCAD's 'wrappers/' directory, so all three
+# are already on sys.path by the time this is imported.
 sys.path.append(os.path.dirname(__file__))
 import gazebo_common  # noqa: E402
+import mass_properties  # noqa: E402
 import ocp_serialize  # noqa: E402
 import urdf_common  # noqa: E402
 
 # Metres per millimetre, for the mesh '<scale>': the meshes are written in
 # millimetres and SDFormat reads mesh coordinates as metres after scaling.
 MESH_SCALE = 1.0 / urdf_common.MM_PER_M
-
-# Density used to turn a volume into a mass when the caller does not name one,
-# in kg/m^3. Aluminium, the same default the URDF exporter uses and for the
-# same reason: a middle-of-the-road value for a machined part, whose provenance
-# is obvious in the output rather than looking like a measurement.
-DEFAULT_DENSITY = 2700.0
-
-# mm^5 -> m^5. The second moment OCCT integrates has units of length^5, so this
-# is what converts it once the density (kg/m^3) is applied.
-MM5_TO_M5 = 1e-15
-# mm^3 -> m^3.
-MM3_TO_M3 = 1e-9
 
 # SDFormat names end up as XML attributes and as scoped names joined by '::',
 # so anything outside this set is replaced.
@@ -115,8 +111,14 @@ SURFACE_PHYSICS = {
 # mirror image of the reader reporting what it cannot keep. When PartCAD grows
 # a physical property, either give it a spelling above or let it be reported
 # here - do not let it disappear quietly.
+#
+# 'density' is here although this writes no '<density>' -- SDFormat grew one
+# only in 1.11, for an '<inertial auto="true">' that Gazebo computes itself --
+# because it is not lost: it is what the mass, the centre of mass and the
+# inertia of a part that states no mass were worked out from, so the file states
+# it as the '<inertial>' it comes to.
 SDF_STATED = (
-    frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia"))
+    frozenset(("mass", "centerOfMass", "inertiaOrientation", "inertia", "density"))
     | frozenset(LINK_PHYSICS)
     | frozenset(SURFACE_PHYSICS)
 )
@@ -247,90 +249,14 @@ def shape_elements(node):
     return own, [child for child in children if not belongs(child)]
 
 
-def inertial_of(placed, density, warnings, link_name):
-    """The ``<inertial>`` values for a link's solids, or None when they have none.
-
-    'placed' is the (shape, packed placement) pairs the link is made of. Each is
-    put where it belongs before the moments are taken, so the result is about
-    the link as a whole. OCCT's GProp_GProps.MatrixOfInertia() is already the
-    tensor about the centre of mass, which is the frame SDFormat's
-    ``<inertia>`` is stated in too, so only the units and the density are
-    applied.
-    """
-    from OCP.BRepGProp import BRepGProp
-    from OCP.GProp import GProp_GProps
-
-    combined_shape = combined(placed)
-    if combined_shape is None:
-        return None
-
-    properties = GProp_GProps()
-    BRepGProp.VolumeProperties_s(combined_shape, properties)
-    volume = properties.Mass()
-    if volume <= 0.0:
-        warnings.append("The link '%s' has no solid volume; it is written without an <inertial>" % link_name)
-        return None
-
-    mass = volume * MM3_TO_M3 * density
-    centre = properties.CentreOfMass()
-    matrix = properties.MatrixOfInertia()
-    scale = MM5_TO_M5 * density
-    return {
-        "mass": mass,
-        "centerOfMass": [centre.X(), centre.Y(), centre.Z()],
-        "inertia": {
-            "ixx": matrix.Value(1, 1) * scale,
-            "ixy": matrix.Value(1, 2) * scale,
-            "ixz": matrix.Value(1, 3) * scale,
-            "iyy": matrix.Value(2, 2) * scale,
-            "iyz": matrix.Value(2, 3) * scale,
-            "izz": matrix.Value(3, 3) * scale,
-        },
-    }
-
-
-def combined(placed):
-    """The (shape, placement) pairs as one compound, each shape put in place."""
-    from OCP.BRep import BRep_Builder
-    from OCP.BRepBuilderAPI import BRepBuilderAPI_Transform
-    from OCP.TopoDS import TopoDS_Compound
-
-    shapes = []
-    for shape, placement in placed:
-        if placement is None:
-            shapes.append(shape)
-            continue
-        shapes.append(BRepBuilderAPI_Transform(shape, _toploc(placement).Transformation(), True).Shape())
-
-    if not shapes:
-        return None
-    if len(shapes) == 1:
-        return shapes[0]
-
-    compound = TopoDS_Compound()
-    builder = BRep_Builder()
-    builder.MakeCompound(compound)
-    for shape in shapes:
-        builder.Add(compound, shape)
-    return compound
-
-
-def _toploc(packed):
-    """A packed PartCAD location as an OCCT TopLoc_Location."""
-    from OCP.gp import gp_Ax1, gp_Dir, gp_Pnt, gp_Trsf, gp_Vec
-    from OCP.TopLoc import TopLoc_Location
-
-    translation, axis, angle = packed
-    transform = gp_Trsf()
-    if any(abs(v) > 0 for v in axis) and abs(angle) > 0:
-        transform.SetRotation(gp_Ax1(gp_Pnt(0, 0, 0), gp_Dir(*axis)), math.radians(angle))
-    transform.SetTranslationPart(gp_Vec(*translation))
-    return TopLoc_Location(transform)
-
-
 def carried_inertial(physics):
-    """The ``<inertial>`` values a part states about itself, or None."""
-    if "mass" not in physics:
+    """The ``<inertial>`` values a physics dict states, or None if it has no mass.
+
+    Stated by the part or worked out by PartCAD, which this cannot tell apart
+    and has no reason to: it restates them in SDFormat's terms and decides
+    nothing.
+    """
+    if not physics or "mass" not in physics:
         return None
     result = {"mass": float(physics["mass"])}
     if "centerOfMass" in physics:
@@ -385,6 +311,11 @@ def write_material(visual, properties):
     sub(material, "diffuse", rgba)
 
 
+def physics_of(node, state):
+    """What PartCAD says about the physics of the part behind one node of the tree."""
+    return (state["properties"].get(node.get("name")) or {}).get("physics") or {}
+
+
 def emit_link(node, model, pose, elements, state):
     """Add one ``<link>``, with a visual and a collision per shape it holds."""
     link_name = state["link_names"].take(node.get("label") or node.get("name"), "link")
@@ -396,7 +327,7 @@ def emit_link(node, model, pose, elements, state):
     if not urdf_common.is_identity(pose):
         sub(link, "pose", gazebo_common.format_pose(pose))
 
-    physics = (state["properties"].get(node.get("name")) or {}).get("physics") or {}
+    physics = physics_of(node, state)
 
     placed = []
     for index, (shape_node, placement) in enumerate(elements):
@@ -420,7 +351,7 @@ def emit_link(node, model, pose, elements, state):
                 write_material(element, state["properties"].get(shape_node.get("name")) or {})
             else:
                 write_surface(element, physics)
-        placed.append((shape, placement))
+        placed.append((physics_of(shape_node, state), placement))
 
     if not placed:
         # A frame that carries children, with no geometry of its own.
@@ -431,10 +362,18 @@ def emit_link(node, model, pose, elements, state):
             sub(link, path, render(physics[name]))
 
     if state["options"]["inertial"]:
-        write_inertial(
-            link,
-            carried_inertial(physics) or inertial_of(placed, state["options"]["density"], state["warnings"], link_name),
-        )
+        # One shape is the link, as PartCAD resolved it. Several are one rigid
+        # body, each placed where the link holds it and added up -- unless the
+        # link states its own mass, which beats the sum of its pieces. See
+        # 'mass_properties.of_body()' in PartCAD.
+        own = None if len(elements) == 1 and elements[0][0] is node else physics
+        values = carried_inertial(mass_properties.of_body(placed, own=own))
+        if values is None:
+            state["warnings"].append(
+                "The link '%s' has no mass: it states none and has no solid to weigh; "
+                "it is written without an <inertial>" % link_name
+            )
+        write_inertial(link, values)
     state["unsupported"].update(set(physics) - SDF_STATED)
     return link
 
@@ -549,7 +488,6 @@ def process(path, request):
             "angularTolerance": request.get("angularTolerance", 0.1),
             "ascii": request.get("ascii", False),
             "inertial": request.get("inertial", True),
-            "density": request.get("density") or DEFAULT_DENSITY,
             "static": request.get("static", True),
             "self_collide": bool(request.get("self_collide", False)),
         },

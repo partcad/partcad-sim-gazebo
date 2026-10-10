@@ -181,6 +181,29 @@ states neither gets the simulator's own default, which is a number nobody chose.
 PartCAD writes each body's own coefficient and says nothing about how the two
 sides of a contact combine: that is Gazebo's model rather than the part's.
 
+## So is what it weighs
+
+The same material says what the part weighs. PartCAD works out every part's
+mass, centre of mass and inertia -- what the part states, or else its solid at
+the density of what it is made of -- and hands them over with the part, so a
+link's `<inertial>` is exactly what `pc info` reports for it, and what the URDF
+and MJCF exports of the same object say. A PTFE block weighs what PTFE weighs
+rather than what aluminium does. The order is:
+
+1. what the part states, as stated;
+2. its `density` -- one it states, or else its material's;
+3. the export's `density` parameter;
+4. 2700 kg/m³, aluminium.
+
+This exporter works none of that out. A link of several shapes -- two materials
+in one link -- is added up by PartCAD's `mass_properties`, the one copy of that
+arithmetic all three exporters share, so it balances where it should. A link
+with no solid in it that states no mass is written without an `<inertial>`, and
+the export says so.
+
+It needs the PartCAD that does this, and says so: `partcad:` in `partcad.yaml`
+makes an older one refuse the package.
+
 ## Tests
 
 ```shell
@@ -192,8 +215,10 @@ end-to-end run is not among what it checks. `test_snapshot.py` needs numpy, and
 `partcad` for the half that reads a world: it places one by pose messages a real
 `gz topic -e` printed. `test_world.py` needs `partcad`
 installed: the reader and the writer are written against the sandbox contract
-that lives there — `ocp_serialize`, `urdf_common` and `primitive_shapes` — and
-the tests import them the same way a sandbox does.
+that lives there — `ocp_serialize`, `urdf_common`, `mass_properties` and
+`primitive_shapes` — and the tests import them the same way a sandbox does. CI
+installs it from PartCAD's `devel` branch, so that a change to that contract
+fails here before it is released.
 
 ## Where this came from
 
