@@ -46,15 +46,27 @@ simulation -- and "nearly" is not something a validation should depend on. Every
 pose message carries the simulated time it was taken at, so this waits for that
 to pass ``duration`` instead, and uses wall-clock only as the timeout that stops
 a run which is not progressing at all.
+
+**Joints.** A world whose models have joints in them -- a hinge, a slide -- is
+also read for where each joint is and how fast it moves, as ``joints`` beside
+``bodies``, in the same vocabulary the MuJoCo plugin states them in: degrees
+for a turn, millimetres for a move, the terms of the ``motion:`` an interface
+declares. Gazebo publishes joint states only for a model that carries its
+JointStatePublisher system, so the world that runs is a copy of the one handed
+over with that system added; see 'plan_joints' and 'JointStream'.
 """
 
+import collections
 import glob
+import math
 import os
 import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
+from xml.etree import ElementTree
 
 # 'snapshot_raster' and 'gazebo_common' are this package's, beside this file.
 # PartCAD runs this script by path, which puts nothing on sys.path for it.
@@ -65,6 +77,10 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 # 'urdf_common' because this script runs in a sandbox that may carry nothing but
 # Gazebo -- and because a number this stable is not worth a dependency.
 MM_PER_M = 1000.0
+
+# Degrees per radian. Gazebo states every angle in radians; PartCAD states a
+# turn in degrees, as the 'motion:' of an interface does, its limits included.
+DEG_PER_RAD = 180.0 / math.pi
 
 # The programs that are a Gazebo, newest first, what each one calls the
 # subcommand that runs a server, and what it calls the one that prints a topic.
@@ -277,6 +293,11 @@ def snapshot(message):
     An entity Gazebo reports with no name at all is kept under its id rather
     than dropped: something moved, and a reading that quietly omits it is worse
     than one that names it awkwardly.
+
+    Its 'joints' are empty: they are published on topics of their own, and
+    'fill' fills them in from those. A world with no joints to
+    read keeps it empty, so a validation can walk ``after["joints"]`` without
+    asking first whether there is one.
     """
     stamp = (message.get("header") or {}).get("stamp") or {}
     seconds = float(stamp.get("sec") or 0) + float(stamp.get("nsec") or 0) / 1e9
@@ -297,7 +318,7 @@ def snapshot(message):
             # that one, so this is a re-ordering rather than a copy.
             "quat": [float(orientation.get(axis) or 0.0) for axis in ("w", "x", "y", "z")],
         }
-    return {"time": seconds, "bodies": bodies}
+    return {"time": seconds, "bodies": bodies, "joints": {}}
 
 
 def unique_poses(message):
@@ -525,6 +546,388 @@ def messages(stream):
         yield "".join(current)
 
 
+#
+# Reading the joints
+#
+# Gazebo states where a model's joints are only for a model that carries its
+# JointStatePublisher system, which publishes a 'gz.msgs.Model' every step: the
+# model, then one 'joint' per joint, each with an 'axis1' holding its 'position'
+# and 'velocity' in radians or metres. A world does not carry it -- PartCAD's
+# exporter writes none, and a world somebody else wrote has no reason to -- so
+# the world that runs is a copy of the one handed over, with the system added to
+# every model that has a joint to read.
+#
+# Added here rather than by the exporter, for three reasons. What a run needs to
+# read is the reader's business: a world written for `pc open --with gazebo`, or
+# for anybody else's tooling, should not carry a system only this script listens
+# to. It works on whatever world this is handed, whoever wrote it. And Gazebo's
+# own defaults survive it: the systems a world runs with when it names none --
+# the physics, and the scene broadcaster the poses come from -- are loaded
+# unless the world attaches a system *to the world*, and this one is attached to
+# a model. (Checked against Harmonic, which says "No systems loaded from SDF,
+# loading defaults" with the publisher on every model.)
+#
+# What the messages do not say is a joint's type -- Harmonic's publisher leaves
+# it out -- so that is read out of the world too, while the copy is made.
+#
+
+JOINT_STATE_PUBLISHER = {
+    "filename": "gz-sim-joint-state-publisher-system",
+    "name": "gz::sim::systems::JointStatePublisher",
+}
+
+# The SDFormat joint types that are read, as the 'motion:' type PartCAD calls
+# them -- which is the same name for each of them, but for a 'revolute' nothing
+# limits ('motion_type'). A screw is read as its turn, which is the coordinate
+# Gazebo gives it; the move along its axis follows from the thread.
+TURNS = ("revolute", "continuous", "screw")
+MOVES = ("prismatic",)
+
+# The joint types that are not, and why. Each such joint is named in the
+# result's 'warnings' instead: something may have moved there, and a reading
+# that quietly leaves it out is worse than one that says it did.
+NOT_READ = {
+    "ball": "Gazebo publishes two of a ball joint's three coordinates, which is not an orientation",
+    "universal": "it turns about two axes, and PartCAD has no motion of that type",
+    "revolute2": "it turns about two axes, and PartCAD has no motion of that type",
+    "gearbox": "PartCAD has no motion of that type",
+}
+
+# SDFormat's own default for a joint limit nobody stated, and so what "no
+# limit" looks like once a world has been through a tool that writes them out.
+NO_LIMIT = 1e16
+
+# How long to wait, in wall-clock seconds, for a model's joint states to reach
+# the instant a pose message was taken at. Both come out of the same step of the
+# same server, so they arrive within moments of each other and this is only
+# ever spent on a stream that is not coming at all -- once, for a stream that
+# has said nothing (see 'JointStream.at').
+PATIENCE = 10.0
+
+
+def note(warnings, message):
+    """Add a warning once, however many readings run into it."""
+    if message not in warnings:
+        warnings.append(message)
+
+
+class JointModel:
+    """One model whose joints are read: what it is called, where they arrive, what they are."""
+
+    def __init__(self, scoped, topic, joints):
+        # 'outer::inner' for a nested model, which is how Gazebo scopes one.
+        self.scoped = scoped
+        # The topic its publisher was told to publish on.
+        self.topic = topic
+        # {name in the world: (motion type, name reported under, SDFormat type)}
+        self.joints = joints
+
+
+def motion_type(joint, declared):
+    """The 'motion:' type of one SDFormat joint of a type that is read.
+
+    Its own type, except that a 'revolute' is one only while something limits
+    it: without a limit it is 'continuous', which is the line PartCAD (and
+    URDF) draws, and the one the MuJoCo plugin reads a hinge by. So a validation
+    reads the same type out of either engine for the same joint, however each
+    file had to spell it -- which matters, because Gazebo cannot run one of the
+    two spellings (see 'joint_states').
+    """
+    if declared != "revolute":
+        return declared
+    for bound in ("axis/limit/lower", "axis/limit/upper"):
+        text = joint.findtext(bound)
+        try:
+            if text is not None and abs(float(text)) < NO_LIMIT:
+                return "revolute"
+        except ValueError:
+            continue
+    return "continuous"
+
+
+def plan_joints(world, prefix, warnings):
+    """Add a JointStatePublisher to every model of 'world' that has a joint to read.
+
+    Returns a 'JointModel' for each, in document order, the publisher of the
+    n-th told to publish on '<prefix>/<n>' -- a topic of this run's own rather
+    than Gazebo's default, so that nothing has to guess how Gazebo names the
+    topic of a nested model, and so that two runs on one machine do not read
+    each other's joints.
+
+    A fixed joint is not read: nothing moves there. Nor is a joint of a static
+    model, or of a model nested in one: the world says nothing of it moves, so
+    there is nothing to say. A joint of a type that is not read is named in
+    'warnings'.
+
+    A joint is reported under its own name where no other joint read has it,
+    and as '<model>::<joint>' where one does -- for every one of them, so that
+    neither is the joint the plain name means. Names are only unique within a
+    model, and a world with two of the same robot in it has two of every joint.
+    """
+    found = []
+
+    def visit(model, scope, static):
+        scoped = scope + [model.get("name") or "model"]
+        static = static or (model.findtext("static") or "").strip().lower() in ("true", "1")
+        if not static:
+            read = {}
+            for joint in model.findall("joint"):
+                name = joint.get("name")
+                declared = (joint.get("type") or "").strip().lower()
+                if not name or declared == "fixed":
+                    continue
+                if declared in TURNS or declared in MOVES:
+                    read[name] = (motion_type(joint, declared), declared)
+                else:
+                    note(
+                        warnings,
+                        "joint '%s' of model '%s' is not reported: it is a '%s' joint, and %s"
+                        % (
+                            name,
+                            "::".join(scoped),
+                            declared,
+                            NOT_READ.get(declared, "this plugin does not know the type"),
+                        ),
+                    )
+            if read:
+                found.append((model, "::".join(scoped), read))
+        for nested in model.findall("model"):
+            visit(nested, scoped, static)
+
+    for model in world.findall("model"):
+        visit(model, [], False)
+
+    counts = collections.Counter(name for _model, _scoped, read in found for name in read)
+    models = []
+    for index, (element, scoped, read) in enumerate(found):
+        topic = "%s/%d" % (prefix, index)
+        plugin = ElementTree.SubElement(element, "plugin", dict(JOINT_STATE_PUBLISHER))
+        ElementTree.SubElement(plugin, "topic").text = topic
+        joints = {
+            name: (kind, name if counts[name] == 1 else "%s::%s" % (scoped, name), declared)
+            for name, (kind, declared) in read.items()
+        }
+        models.append(JointModel(scoped, topic, joints))
+    return models
+
+
+def prepare_world(scene_file, warnings):
+    """The world to run, and the models whose joints are read in it.
+
+    The world as it was handed over when nothing in it has a joint to read -- so
+    a world of free models, which is every world PartCAD exports today, runs
+    exactly as it always has -- and otherwise a copy of it with the publishers
+    added ('plan_joints'), which 'process' removes again when the run is over.
+    The copy is written beside the world rather than anywhere else, because a
+    world names its meshes relative to where it is.
+
+    Joints of a model the world brings in with '<include>' are not read: they
+    are in another file. PartCAD's exporter writes everything into the one.
+    """
+    try:
+        tree = ElementTree.parse(scene_file)
+    except ElementTree.ParseError:
+        # Not this function's to report: the server reads it next, and says
+        # what is wrong with it the way it always has.
+        return scene_file, []
+    root = tree.getroot()
+    world = root if root.tag == "world" else root.find("world")
+    if world is None:
+        return scene_file, []
+    models = plan_joints(world, "/partcad/%d/joint_state" % os.getpid(), warnings)
+    if not models:
+        return scene_file, []
+    stem, extension = os.path.splitext(scene_file)
+    copy = "%s.joint-states%s" % (stem, extension or ".world")
+    try:
+        tree.write(copy, encoding="utf-8", xml_declaration=True)
+    except OSError as e:
+        note(warnings, "the joints are not reported: the world could not be copied to add what publishes them: %s" % e)
+        return scene_file, []
+    return copy, models
+
+
+_STAMP = re.compile(r"header \{\s*stamp \{([^}]*)\}")
+_SECONDS = re.compile(r"\bsec: (\d+)")
+_NANOSECONDS = re.compile(r"\bnsec: (\d+)")
+
+
+def message_time(text):
+    """The simulated time a message was published at, read off its header alone.
+
+    A joint-state message arrives every step and nearly all of them are never
+    read, so only the header of each is: the rest is parsed if a reading asks
+    for that one. The same sum 'snapshot' makes of the same two fields, so that
+    the two clocks compare equal at the same instant.
+    """
+    match = _STAMP.match(text)
+    if match is None:
+        return 0.0
+    seconds = _SECONDS.search(match.group(1))
+    nanoseconds = _NANOSECONDS.search(match.group(1))
+    return float(seconds.group(1) if seconds else 0) + float(nanoseconds.group(1) if nanoseconds else 0) / 1e9
+
+
+class JointStream:
+    """The joint states one model publishes, kept for as long as a reading may ask for them.
+
+    Read on a thread of its own ('follow'), because they arrive on a stream of
+    their own -- a message every step, where the poses arrive a few dozen times
+    a second -- and a stream nobody reads stops the program writing it. Each
+    message is kept as text with its time, and parsed only if a reading asks for
+    it; 'forget_before' drops what no reading can ask for any more, which keeps
+    what is held to the few moments one stream runs ahead of the other.
+    """
+
+    def __init__(self, model):
+        self.model = model
+        self.entries = collections.deque()
+        self.newest = None
+        self.ended = False
+        self.silent = False
+        self.condition = threading.Condition()
+
+    def follow(self, stream):
+        """Keep every message 'stream' carries, until it ends."""
+        try:
+            for text in messages(stream):
+                stamp = message_time(text)
+                with self.condition:
+                    self.entries.append((stamp, text))
+                    self.newest = stamp
+                    self.condition.notify_all()
+        except (OSError, ValueError):
+            # Closed under it, which is one of the ways a run ends.
+            pass
+        finally:
+            with self.condition:
+                self.ended = True
+                self.condition.notify_all()
+
+    def at(self, moment, patience=PATIENCE):
+        """The message taken at 'moment', as text, or None if there is none at all.
+
+        Waits for the stream to get that far first, since it runs alongside the
+        poses rather than in step with them -- for up to 'patience' seconds,
+        and only once for a stream that has said nothing in that time, which is
+        a publisher that is not there rather than one that is slow.
+
+        The message is the latest one taken at or before 'moment': the one of
+        that very step, unless the subscriber missed it. Failing that -- a
+        stream that only started after it -- the first one there is.
+        """
+        with self.condition:
+            deadline = time.monotonic() + patience
+            while not self.ended and not self.silent and (self.newest is None or self.newest < moment):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self.silent = self.newest is None
+                    break
+                self.condition.wait(remaining)
+            chosen = None
+            for stamp, text in self.entries:
+                if stamp > moment:
+                    if chosen is None:
+                        chosen = text
+                    break
+                chosen = text
+            return chosen
+
+    def forget_before(self, moment):
+        """Drop every message older than the latest one taken at or before 'moment'.
+
+        A reading is never asked for at an instant earlier than a pose message
+        already seen, so that one is the earliest any reading can still want.
+        """
+        with self.condition:
+            while len(self.entries) > 1 and self.entries[1][0] <= moment:
+                self.entries.popleft()
+
+
+def joint_states(message, model, warnings):
+    """The joints of one model in one of its joint-state messages, in PartCAD's terms.
+
+    The terms of the 'motion:' an interface declares, and the same vocabulary
+    the MuJoCo plugin reports in:
+
+      revolute, continuous, screw  'pos' in degrees, 'vel' in degrees per second
+      prismatic                    'pos' in millimetres, 'vel' in mm/s
+
+    'pos' is the joint's own coordinate, zero where the world placed the child
+    link: a pendulum written out horizontal reads 0 there and 90, one way or
+    the other, hanging down.
+
+    There is no 'effort', which the MuJoCo plugin does report. The message has a
+    field for it and Harmonic leaves it empty -- it stays empty while a force is
+    being applied to the joint -- and a zero nobody measured would be read as a
+    measurement.
+
+    A joint that should be here and is not, or that Gazebo ran with no freedom
+    to move, is named in 'warnings' rather than reported as standing still.
+    """
+    states = {}
+    published = set()
+    for joint in _as_list(message.get("joint")):
+        name = joint.get("name")
+        if name not in model.joints:
+            continue
+        published.add(name)
+        kind, reported, declared = model.joints[name]
+        axis = joint.get("axis1")
+        if not isinstance(axis, dict):
+            # No coordinate at all: Gazebo built it without a degree of
+            # freedom. Which is what Harmonic's DART does with every
+            # 'continuous' joint, saying so only in the server's own log.
+            note(
+                warnings,
+                "joint '%s' of model '%s' is not reported: Gazebo ran it with no freedom to move%s"
+                % (
+                    name,
+                    model.scoped,
+                    (
+                        " (its DART physics builds a 'continuous' joint as a fixed one; a 'revolute'"
+                        " with no limits is the same joint, and moves)"
+                        if declared == "continuous"
+                        else ""
+                    ),
+                ),
+            )
+            continue
+        scale = DEG_PER_RAD if kind in TURNS else MM_PER_M
+        states[reported] = {
+            "type": kind,
+            "pos": float(axis.get("position") or 0.0) * scale,
+            "vel": float(axis.get("velocity") or 0.0) * scale,
+        }
+    for name in model.joints:
+        if name not in published:
+            note(
+                warnings,
+                "joint '%s' of model '%s' is not reported: it is not among the joint states Gazebo published"
+                % (name, model.scoped),
+            )
+    return states
+
+
+def fill(reading, streams, warnings, patience=PATIENCE):
+    """State in 'reading' where the joints of every stream were at its instant.
+
+    'patience' is how long to wait for a stream that has not got that far yet
+    (see 'JointStream.at'); nothing is worth waiting for once the server that
+    publishes them has gone.
+    """
+    for stream in streams:
+        text = stream.at(reading["time"], patience)
+        if text is None:
+            note(
+                warnings,
+                "the joints of model '%s' are not reported: Gazebo published no joint states for it"
+                % stream.model.scoped,
+            )
+            continue
+        reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
+
+
 def process(path, request):
     (server, server_args, topic_command), environment = locate_gazebo()
 
@@ -534,12 +937,15 @@ def process(path, request):
     timeout = float(request.get("timeout") or 300.0)
     world = request.get("world_name") or world_name(scene_file)
     topic = "/world/%s/pose/info" % world
+    warnings = []
+    # The world as handed over, or a copy of it that publishes its joints.
+    run_file, joint_models = prepare_world(scene_file, warnings)
 
     command = [server] + list(server_args) + ["-s", "-r", "-v", "1"]
     timestep = request.get("timestep")
     if timestep:
         command += ["-z", str(1.0 / float(timestep))]
-    command.append(scene_file)
+    command.append(run_file)
 
     # The subscriber first. It is the thing that has to be listening before the
     # server starts publishing; the other way round loses the opening reading,
@@ -557,7 +963,25 @@ def process(path, request):
     # keyed by name is enough for a validation and not for a picture, which
     # has to know which link of which model each pose belongs to.
     first = last = None
+    joint_watchers = []
+    streams = []
     try:
+        # A subscriber for the joints of each model that has any, listening
+        # before the server starts for the reason the one above is.
+        for model in joint_models:
+            joint_watchers.append(
+                subprocess.Popen(
+                    [server, topic_command, "-e", "-t", model.topic],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    text=True,
+                    bufsize=1,
+                    env=environment,
+                )
+            )
+            streams.append(JointStream(model))
+            threading.Thread(target=streams[-1].follow, args=(joint_watchers[-1].stdout,), daemon=True).start()
+
         simulator = subprocess.Popen(
             command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=environment
         )
@@ -577,9 +1001,13 @@ def process(path, request):
             if before is None:
                 before = reading
                 first = message
+                fill(before, streams, warnings)
             after = reading
             last = message
+            for stream in streams:
+                stream.forget_before(reading["time"])
             if next_sample is not None and reading["time"] >= next_sample:
+                fill(reading, streams, warnings)
                 trace.append(reading)
                 next_sample += every
             if reading["time"] >= duration:
@@ -601,8 +1029,14 @@ def process(path, request):
                 "Gazebo published no poses for world '%s', so there is nothing to report. "
                 "%s%s" % (world, "The server said: " if stderr.strip() else "", stderr.strip())
             )
+        # Here rather than as the loop takes it, because which reading is the
+        # last is only known once the loop is over -- and here rather than
+        # after it, because the server is still up and still publishing, and
+        # the joint states of that instant may still be on their way. Unless it
+        # is not, in which case what has arrived is all there will be.
+        fill(after, streams, warnings, PATIENCE if simulator.poll() is None else 0.0)
     finally:
-        for process_handle in (simulator, watcher):
+        for process_handle in [simulator, watcher] + joint_watchers:
             if process_handle is None or process_handle.poll() is not None:
                 continue
             process_handle.terminate()
@@ -610,6 +1044,11 @@ def process(path, request):
                 process_handle.wait(timeout=10)
             except subprocess.TimeoutExpired:
                 process_handle.kill()
+        if run_file != scene_file:
+            try:
+                os.remove(run_file)
+            except OSError:
+                pass
 
     result = {
         "success": True,
@@ -627,7 +1066,6 @@ def process(path, request):
     }
     if trace:
         result["samples"] = trace
-    warnings = []
     drawn = take_snapshots(path, request.get("snapshot"), scene_file, first, last, warnings)
     if drawn:
         result["snapshots"] = drawn
