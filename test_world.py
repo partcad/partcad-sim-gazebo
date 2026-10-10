@@ -577,11 +577,17 @@ def export_world(monkeypatch):
 
     monkeypatch.setattr(ocp_serialize, "decode_shape", lambda obj: ("shape", obj.get("brep")))
     monkeypatch.setattr(module, "write_mesh", lambda shape, path, options: open(path, "wb").write(b"solid x\n"))
-    monkeypatch.setattr(
-        module,
-        "inertial_of",
-        lambda placed, density, warnings, link_name: {"mass": 1.0, "centerOfMass": [0.0, 0.0, 0.0]},
-    )
+
+    # What each link was weighed at, shape by shape: the integration itself is
+    # OCCT's and is tested on its own, below, where OCCT is installed.
+    weighed = {}
+
+    def inertial_of(placed, warnings, link_name):
+        weighed[link_name] = [density for _shape, _placement, density in placed]
+        return {"mass": 1.0, "centerOfMass": [0.0, 0.0, 0.0]}
+
+    monkeypatch.setattr(module, "inertial_of", inertial_of)
+    monkeypatch.setattr(module, "weighed", weighed, raising=False)
     return module
 
 
@@ -673,6 +679,108 @@ def test_what_a_part_says_about_itself_is_written_rather_than_recomputed(export_
 
     # A property SDFormat cannot state is reported rather than dropped in silence.
     assert result["unsupported"] == ["torsion"]
+
+
+def test_a_part_is_weighed_at_what_it_is_made_of(export_world, tmp_path):
+    """The density a part's material states is what its link is weighed at.
+
+    What PartCAD hands over for a part made of PTFE is that material's density
+    under the part's own name, already in kg/m^3 -- it resolved the material and
+    converted it -- so this exporter reads a 'density' the way it reads a
+    'friction', and never learns that materials exist. The export's own density
+    is for a part that says nothing about what it is made of.
+    """
+    root = {
+        "name": "//p:bench",
+        "label": "bench",
+        "assembly": [
+            envelope("//p:ptfe", "ptfe", b"PTFE"),
+            envelope("//p:plain", "plain", b"PLAIN", [[50.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+    properties = {"//p:ptfe": {"material": ":ptfe", "physics": {"density": 2200.0, "friction": 0.04}}}
+
+    result, _sdf = exported(export_world, tmp_path / "bench.world", root, properties=properties)
+    assert export_world.weighed == {"ptfe": [2200.0], "plain": [2700.0]}
+    # Not written as itself -- SDFormat states the mass it comes to -- and not
+    # reported as lost either.
+    assert result["unsupported"] == []
+
+    # A fallback, not an override.
+    export_world.weighed.clear()
+    exported(export_world, tmp_path / "light.world", root, properties=properties, density=1000.0)
+    assert export_world.weighed == {"ptfe": [2200.0], "plain": [1000.0]}
+
+
+def test_a_stated_mass_is_not_weighed_again(export_world, tmp_path):
+    """A part weighed on the bench is not weighed again at its material's density."""
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    properties = {"//p:cube": {"physics": {"mass": 2.5, "density": 2200.0}}}
+
+    _result, sdf = exported(export_world, tmp_path / "bench.world", root, properties=properties)
+
+    assert sdf.find("world/model[@name='cube']/link/inertial/mass").text == "2.5"
+    assert export_world.weighed == {}
+
+
+def test_each_shape_of_a_link_is_weighed_at_its_own_density(export_world, tmp_path):
+    """A link of three shapes: two say what they are made of, the third takes the link's."""
+    wrist = {
+        "name": "//p:wrist",
+        "label": "wrist",
+        "assembly": [
+            envelope("//p:steel", "wrist/1", b"STEEL"),
+            envelope("//p:foam", "wrist/2", b"FOAM", [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+            envelope("//p:bare", "wrist/3", b"BARE", [[200.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
+        ],
+    }
+    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    properties = {
+        "//p:wrist": {"physics": {"density": 5000.0}},
+        "//p:steel": {"physics": {"density": 8000.0}},
+        "//p:foam": {"physics": {"density": 100.0}},
+    }
+
+    exported(export_world, tmp_path / "arm.world", root, properties=properties)
+
+    assert export_world.weighed == {"wrist": [8000.0, 100.0, 5000.0]}
+
+
+def test_a_density_that_weighs_nothing_is_reported_and_passed_over(export_world, tmp_path):
+    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    properties = {"//p:cube": {"physics": {"density": -1.0}}}
+
+    result, _sdf = exported(export_world, tmp_path / "bench.world", root, properties=properties)
+
+    assert export_world.weighed == {"cube": [2700.0]}
+    assert any("density" in warning and "'cube'" in warning for warning in result["warnings"])
+
+
+def test_a_link_of_two_materials_balances_where_the_heavier_one_pulls_it():
+    """The integration itself: each shape at its own density, the link as their sum.
+
+    Needs OCCT, which `partcad` does not bring with it; skipped where it is not
+    installed rather than stubbed, because what is under test here is OCCT's
+    arithmetic and the units this applies to it.
+    """
+    pytest.importorskip("OCP")
+    import export_world
+    from OCP.BRepPrimAPI import BRepPrimAPI_MakeBox
+
+    def box():
+        return BRepPrimAPI_MakeBox(10.0, 20.0, 30.0).Shape()
+
+    apart = [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]
+    values = export_world.inertial_of([(box(), None, 8000.0), (box(), apart, 100.0)], [], "wrist")
+
+    # 6000 mm^3 is 6e-6 m^3.
+    steel, foam = 8000.0 * 6e-6, 100.0 * 6e-6
+    assert values["mass"] == pytest.approx(steel + foam)
+    x = (steel * 5.0 + foam * 105.0) / (steel + foam)
+    assert values["centerOfMass"] == pytest.approx([x, 10.0, 15.0])
+    # Each box's own Ixx about its centre (b^2 + c^2)/12, in metres; the two
+    # sit on one line along X, so Ixx does not move.
+    assert values["inertia"]["ixx"] == pytest.approx((steel + foam) * (0.02**2 + 0.03**2) / 12.0)
 
 
 def test_a_scene_is_written_static_with_a_light_and_a_ground_unless_told_otherwise(export_world, tmp_path):

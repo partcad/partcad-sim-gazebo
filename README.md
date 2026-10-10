@@ -181,6 +181,24 @@ states neither gets the simulator's own default, which is a number nobody chose.
 PartCAD writes each body's own coefficient and says nothing about how the two
 sides of a contact combine: that is Gazebo's model rather than the part's.
 
+## So is what it weighs
+
+The same material says what the part weighs. A link's `<inertial>` -- its mass,
+its centre of mass and its inertia -- is integrated from the solid at the
+density of what each of its shapes is made of, so a PTFE block weighs what PTFE
+weighs rather than what aluminium does, and a link of two shapes in two
+materials balances where it should. The order is:
+
+1. a `mass` the part states, written as it was stated;
+2. the part's `density` -- one it states, or else its material's;
+3. the export's `density` parameter;
+4. 2700 kg/m³, aluminium.
+
+A part that names no material comes out exactly as it did before materials
+existed. A material is declared in g/mm³ and arrives here already in kg/m³:
+PartCAD converts it once, and this exporter has no factor of a million of its
+own.
+
 ## Tests
 
 ```shell
