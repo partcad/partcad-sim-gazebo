@@ -53,7 +53,7 @@ PartCAD package can teach PartCAD, and all four are about that one format:
 | `import:` | read a `.world` file as a PartCAD scene | `type: sim-gazebo:world` |
 | `export:` | write a PartCAD scene out as one | `pc export -S -t sim-gazebo:world` |
 | `simulation:` | run one and say where everything ended up | `simulation: sim-gazebo:gazebo` |
-| `open:` | open one in the Gazebo GUI | `pc open --with gazebo` |
+| `open:` | open one in the Gazebo GUI | `pc ide open --with gazebo` |
 
 They are declared together because they are one piece of knowledge. A reader and
 a writer of the same format disagree the moment they are maintained apart, and
