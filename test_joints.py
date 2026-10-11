@@ -266,7 +266,9 @@ def test_a_world_with_joints_runs_as_a_copy_beside_it_and_the_original_is_not_to
 
     run_file, models = sim.prepare_world(str(scene), [])
 
-    assert run_file == str(tmp_path / "scene.joint-states.world")
+    assert os.path.dirname(run_file) == str(tmp_path)
+    assert os.path.basename(run_file).startswith("scene.joint-states.")
+    assert run_file.endswith(".world")
     assert [m.scoped for m in models] == ["rig"]
     assert scene.read_text(encoding="utf-8") == text
     copied = ElementTree.parse(run_file).getroot()
@@ -288,6 +290,87 @@ def test_a_world_that_cannot_be_copied_runs_as_it_is_and_says_why_there_are_no_j
 
     assert sim.prepare_world(str(scene), warnings) == (str(scene), [])
     assert "the joints are not reported" in warnings[0]
+    # Nor is the file it was going to be left behind.
+    assert sorted(os.listdir(tmp_path)) == ["scene.world"]
+
+
+def jointed(tmp_path):
+    scene = tmp_path / "scene.world"
+    scene.write_text(
+        '<sdf version="1.9"><world name="w">%s</world></sdf>' % model("rig", joint("swing", "revolute")),
+        encoding="utf-8",
+    )
+    return scene
+
+
+def test_two_runs_of_one_world_each_get_a_copy_of_their_own(tmp_path):
+    """A fixed name would be shared by both: each would write it over the
+    other's, and the first to finish would delete it from under the second."""
+    scene = jointed(tmp_path)
+
+    first, _ = sim.prepare_world(str(scene), [])
+    second, _ = sim.prepare_world(str(scene), [])
+
+    assert first != second
+    assert os.path.isfile(first) and os.path.isfile(second)
+    assert os.path.dirname(first) == os.path.dirname(second) == str(tmp_path)
+
+
+def test_a_file_that_happens_to_have_the_name_a_copy_once_had_is_left_alone(tmp_path):
+    scene = jointed(tmp_path)
+    theirs = tmp_path / "scene.joint-states.world"
+    theirs.write_text("somebody else's", encoding="utf-8")
+
+    run_file, _ = sim.prepare_world(str(scene), [])
+
+    assert run_file != str(theirs)
+    assert theirs.read_text(encoding="utf-8") == "somebody else's"
+
+
+class Refused(OSError):
+    pass
+
+
+def failing_run(tmp_path, monkeypatch, failing, **request):
+    """'process' on a world with a joint, where the 'failing'-th program it
+    starts (0: the pose subscriber) cannot be started, and nothing else is."""
+    scene = jointed(tmp_path)
+    monkeypatch.setattr(sim, "locate_gazebo", lambda: (("gz", ["sim"], "topic"), None))
+    started = []
+
+    class Started:
+        def __init__(self, command, **_kwargs):
+            if len(started) == failing:
+                raise Refused(command[1])
+            started.append(self)
+            self.stdout = iter(())
+            self.stderr = None
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(sim.subprocess, "Popen", Started)
+    request.setdefault("duration", 0.1)
+    with pytest.raises((Refused, ValueError)):
+        sim.process(str(tmp_path), dict(request, scene_file=str(scene)))
+    return sorted(os.listdir(tmp_path))
+
+
+def test_a_run_that_fails_before_it_starts_anything_leaves_no_copy(tmp_path, monkeypatch):
+    assert failing_run(tmp_path, monkeypatch, failing=99, timestep="fast") == ["scene.world"]
+
+
+def test_a_run_whose_pose_subscriber_cannot_start_leaves_no_copy(tmp_path, monkeypatch):
+    assert failing_run(tmp_path, monkeypatch, failing=0) == ["scene.world"]
+
+
+def test_a_run_that_fails_once_the_copy_is_made_removes_it(tmp_path, monkeypatch):
+    """The joint subscriber, the first thing started after the copy is made."""
+    assert failing_run(tmp_path, monkeypatch, failing=1) == ["scene.world"]
+
+
+def test_a_run_whose_server_cannot_start_removes_it_too(tmp_path, monkeypatch):
+    assert failing_run(tmp_path, monkeypatch, failing=2) == ["scene.world"]
 
 
 #

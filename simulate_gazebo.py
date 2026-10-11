@@ -64,6 +64,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from xml.etree import ElementTree
@@ -719,7 +720,12 @@ def prepare_world(scene_file, warnings):
     exactly as it always has -- and otherwise a copy of it with the publishers
     added ('plan_joints'), which 'process' removes again when the run is over.
     The copy is written beside the world rather than anywhere else, because a
-    world names its meshes relative to where it is.
+    world names its meshes relative to where it is -- and under a name of its
+    own each time ('<stem>.joint-states.<random><extension>'), because a fixed
+    one is shared by every run of the same world at once: each would write it
+    over the other's, the first to finish would delete it from under the
+    rest, and a file of that name somebody else put there would be lost.
+    It is never left behind: one that cannot be written is removed here.
 
     Joints of a model the world brings in with '<include>' are not read: they
     are in another file. PartCAD's exporter writes everything into the one.
@@ -737,11 +743,24 @@ def prepare_world(scene_file, warnings):
     models = plan_joints(world, "/partcad/%d/joint_state" % os.getpid(), warnings)
     if not models:
         return scene_file, []
-    stem, extension = os.path.splitext(scene_file)
-    copy = "%s.joint-states%s" % (stem, extension or ".world")
+    stem, extension = os.path.splitext(os.path.basename(scene_file))
+    copy = None
     try:
-        tree.write(copy, encoding="utf-8", xml_declaration=True)
-    except OSError as e:
+        handle, copy = tempfile.mkstemp(
+            prefix="%s.joint-states." % stem,
+            suffix=extension or ".world",
+            dir=os.path.dirname(os.path.abspath(scene_file)),
+        )
+        with os.fdopen(handle, "wb") as out:
+            tree.write(out, encoding="utf-8", xml_declaration=True)
+    except BaseException as e:
+        if copy is not None:
+            try:
+                os.remove(copy)
+            except OSError:
+                pass
+        if not isinstance(e, OSError):
+            raise
         note(warnings, "the joints are not reported: the world could not be copied to add what publishes them: %s" % e)
         return scene_file, []
     return copy, models
@@ -938,14 +957,11 @@ def process(path, request):
     world = request.get("world_name") or world_name(scene_file)
     topic = "/world/%s/pose/info" % world
     warnings = []
-    # The world as handed over, or a copy of it that publishes its joints.
-    run_file, joint_models = prepare_world(scene_file, warnings)
 
     command = [server] + list(server_args) + ["-s", "-r", "-v", "1"]
     timestep = request.get("timestep")
     if timestep:
         command += ["-z", str(1.0 / float(timestep))]
-    command.append(run_file)
 
     # The subscriber first. It is the thing that has to be listening before the
     # server starts publishing; the other way round loses the opening reading,
@@ -965,7 +981,14 @@ def process(path, request):
     first = last = None
     joint_watchers = []
     streams = []
+    run_file = scene_file
     try:
+        # The world as handed over, or a copy of it that publishes its joints.
+        # Made inside the 'try' whose 'finally' removes it, so that nothing
+        # that can fail lies between the two and leaves it behind.
+        run_file, joint_models = prepare_world(scene_file, warnings)
+        command.append(run_file)
+
         # A subscriber for the joints of each model that has any, listening
         # before the server starts for the reason the one above is.
         for model in joint_models:
