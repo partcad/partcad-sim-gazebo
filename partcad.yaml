@@ -44,6 +44,31 @@ docs:
     is written by whoever wrote the part, against the numbers that part is drawn
     in.
 
+    Beside `bodies`, each reading carries a `joints` object: one entry per joint
+    of the world, by its name, in the vocabulary
+    [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) reports
+    joints in -- the terms an interface's `motion:` is written in:
+
+    | `type` | in SDFormat | `pos` | `vel` |
+    | --- | --- | --- | --- |
+    | `revolute` | a `revolute` with a `<limit>` | degrees | deg/s |
+    | `continuous` | a `revolute` without one | degrees | deg/s |
+    | `prismatic` | a `prismatic` | mm | mm/s |
+    | `screw` | a `screw`, by its turn | degrees | deg/s |
+
+    `pos` is the joint's own coordinate, zero where the world placed the child
+    link. There is no `effort`, which the MuJoCo plugin reports: Gazebo's
+    joint state publisher leaves it empty even while a force is applied. A
+    `fixed` joint and the joints of a `<static>` model are not listed, since
+    nothing there moves; a ball joint (Gazebo publishes two of its three
+    coordinates), a `universal`, `revolute2` or `gearbox` one, and one Gazebo
+    ran with no freedom to move -- which is what Harmonic's DART makes of a
+    `continuous` joint, so write an unlimited `revolute` instead -- are named in
+    `warnings`. Two joints of one name in two models are reported as
+    `<model>::<joint>`. A world with no joints to read, which is every world
+    PartCAD exports today, reports `joints: {}`, so a validation can walk
+    `after["joints"]` without asking first whether there is one.
+
     ### Gazebo itself is not a Python package
 
     Which is the one way this differs from

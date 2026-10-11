@@ -77,8 +77,8 @@ the end:
 
 ```json
 {
-  "before": {"time": 0.0,  "bodies": {"top": {"pos": [0, 0, 30], "quat": [1, 0, 0, 0]}}},
-  "after":  {"time": 10.0, "bodies": {"top": {"pos": [29.7, 0, 9.8], "quat": [...]}}},
+  "before": {"time": 0.0,  "bodies": {"top": {"pos": [0, 0, 30], "quat": [1, 0, 0, 0]}}, "joints": {}},
+  "after":  {"time": 10.0, "bodies": {"top": {"pos": [29.7, 0, 9.8], "quat": [...]}}, "joints": {}},
   "simulator": "gazebo", "world": "stack", "duration": 10.0, "units": "mm"
 }
 ```
@@ -95,6 +95,70 @@ The clock is read out of the messages rather than off the wall, which matters:
 `gz sim -r` runs at a real-time factor of about one, and "about" is not something
 a validation should depend on. Wall-clock time is only the `timeout` that stops a
 run which is not progressing at all.
+
+### Joints
+
+A world whose models have joints in them — a hinge, a slide — also says where
+each of them is, as `joints` beside `bodies`, in the vocabulary
+[partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) reports
+them in: the terms an interface's `motion:` is written in, **degrees** for a
+turn and **millimetres** for a move.
+
+```json
+"joints": {
+  "swing": {"type": "continuous", "pos": 93.2, "vel": 358.6},
+  "drop":  {"type": "prismatic", "pos": -896.4, "vel": -4188.9}
+}
+```
+
+| `type` | in SDFormat | `pos` | `vel` |
+| --- | --- | --- | --- |
+| `revolute` | a `revolute` with a `<limit>` | degrees | deg/s |
+| `continuous` | a `revolute` without one | degrees | deg/s |
+| `prismatic` | a `prismatic` | mm | mm/s |
+| `screw` | a `screw`, by its turn | degrees | deg/s |
+
+* **`pos`** is the joint's own coordinate: zero where the world placed the
+  child link. A pendulum written out horizontal reads 0 there and 90, one way
+  or the other, hanging down.
+* A turn nothing limits is **`continuous`**, whatever the world calls it — the
+  line the MuJoCo plugin draws too, so a validation reads the same type out of
+  either engine. Write one as a `revolute` with no `<limit>`: Harmonic's DART
+  physics builds a `continuous` joint as a *fixed* one, and says so only in the
+  server's own log.
+* **No `effort`**, which the MuJoCo plugin reports. Gazebo's joint state
+  publisher has a field for it and leaves it empty — it stays empty while a
+  force is being applied to the joint — and a zero nobody measured would be
+  read as a measurement.
+* **No ball joints.** Gazebo publishes two of a ball joint's three coordinates,
+  which is not an orientation.
+* Not listed, because nothing there moves: a `fixed` joint, and every joint of
+  a `<static>` model. Not read: joints of a model a world brings in with
+  `<include>`, which are in another file — PartCAD's exporter writes everything
+  into the one.
+* Every joint that could have moved and is not reported is **named in
+  `warnings`** with the reason: a ball joint, a `universal`, `revolute2` or
+  `gearbox` one (PartCAD has no motion of those types), and one Gazebo ran with
+  no freedom to move. A reading never quietly leaves out something that moved.
+* A joint is reported under its own name, and as **`<model>::<joint>`** where
+  another model has a joint of the same name — both of them, so that neither is
+  the one the plain name means. A nested model is `outer::inner`.
+* A world with no joints to read — every world PartCAD exports today — reports
+  `"joints": {}`, so a validation can walk `after["joints"]` without asking
+  first whether it is there.
+
+```yaml
+validation: after["joints"]["swing"]["pos"] > 80    # it swung down
+```
+
+Gazebo publishes a model's joint states only if the model carries its
+`JointStatePublisher` system, and a world has no reason to. So when there is a
+joint to read, the server runs a copy of the world with that system added to
+each model that has one, on a topic of the run's own — written beside the
+original, because a world names its meshes relative to where it is, and removed
+when the run ends. A world with nothing to read runs exactly as it was handed
+over. The states arrive every step and each reading takes the one of its own
+simulated instant, so a reading's joints and its bodies are the same moment.
 
 ## Snapshots
 
@@ -194,6 +258,19 @@ end-to-end run is not among what it checks. `test_snapshot.py` needs numpy, and
 installed: the reader and the writer are written against the sandbox contract
 that lives there — `ocp_serialize`, `urdf_common` and `primitive_shapes` — and
 the tests import them the same way a sandbox does.
+
+`test_joints.py` needs nothing but the standard library for everything but its
+last few tests, which run a pendulum and a slider in a real Gazebo and check
+their `joints` against physics with a known answer. Those are skipped where
+there is no Gazebo — CI's runners have none — and run in the image the
+simulation itself uses:
+
+```shell
+docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 --entrypoint bash \
+    ghcr.io/partcad/partcad-sim-gazebo:latest -c \
+    'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \
+     && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py'
+```
 
 ## Where this came from
 
