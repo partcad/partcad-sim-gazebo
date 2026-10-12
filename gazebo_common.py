@@ -57,6 +57,34 @@ MESH_PART_TYPES = {
 IDENTITY = (urdf_common.IDENTITY_Q, urdf_common.IDENTITY_T)
 
 
+def gravity_vector(value, where):
+    """'value' as SDFormat's ``<gravity>``: three finite numbers, in m/s^2.
+
+    The one check both the exporter and the simulation make before a gravity is
+    written into a world, because SDFormat takes exactly three components and a
+    world with any other number is one Gazebo refuses, or worse reads wrongly.
+
+    Raises:
+        ValueError: 'value' is not three finite numbers. 'where' says whose
+            gravity it was, since "could not convert" names nothing.
+    """
+    if isinstance(value, (str, bytes)) or not hasattr(value, "__iter__"):
+        raise ValueError("%s: gravity is three numbers in m/s^2, such as [0, 0, -9.81]; got %r" % (where, value))
+    components = list(value)
+    if len(components) != 3:
+        raise ValueError("%s: gravity is three numbers in m/s^2; got %d: %r" % (where, len(components), value))
+    vector = []
+    for component in components:
+        try:
+            number = float(component)
+        except (TypeError, ValueError):
+            number = None
+        if isinstance(component, bool) or number is None or not math.isfinite(number):
+            raise ValueError("%s: gravity is three numbers in m/s^2; %r is not one" % (where, component))
+        vector.append(number)
+    return vector
+
+
 def parse_pose(element, warnings=None):
     """One ``<pose>`` element as a ``(q, t)`` pose with 't' in millimetres.
 
