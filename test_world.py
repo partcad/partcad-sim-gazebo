@@ -849,6 +849,14 @@ def test_a_gravity_given_to_the_export_itself_beats_the_scenes(export_world, tmp
     assert [float(v) for v in sdf.find("world/gravity").text.split()] == [0.0, 0.0, -3.72]
 
 
+@pytest.mark.parametrize("gravity", [[0.0, -9.81], 9.81, [0.0, 0.0, "x"], [True, 0.0, -9.8]])
+def test_a_gravity_that_is_not_three_numbers_is_refused_and_says_whose(export_world, gravity):
+    with pytest.raises(ValueError, match="the scene's 'gravity'"):
+        export_world.gravity_of({}, {"gravity": gravity})
+    with pytest.raises(ValueError, match="the export's 'gravity'"):
+        export_world.gravity_of({"gravity": gravity}, {})
+
+
 def test_this_package_states_no_gravity_of_its_own_to_beat_the_scenes_with():
     """A default in the declaration would be an explicit option in every request."""
     with open(os.path.join(HERE, "partcad.yaml"), encoding="utf-8") as f:

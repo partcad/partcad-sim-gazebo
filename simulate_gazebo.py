@@ -289,14 +289,19 @@ def world_gravity(path, gravity=None):
     element = root if root.tag == "world" else root.find("world")
     if element is None:
         raise Exception("The world file holds no world: %s" % path)
-    if gravity:
+    import gazebo_common
+
+    if gravity is not None:
+        vector = gazebo_common.gravity_vector(gravity, "the simulation's 'gravity' for %s" % path)
         node = element.find("gravity")
         if node is None:
             node = ElementTree.SubElement(element, "gravity")
-        node.text = " ".join(repr(float(v)) for v in gravity)
+        node.text = " ".join(repr(v) for v in vector)
         tree.write(path, encoding="utf-8", xml_declaration=True)
     text = element.findtext("gravity")
-    return [float(v) for v in text.split()] if text and text.strip() else list(SDF_DEFAULT_GRAVITY)
+    if not text or not text.strip():
+        return list(SDF_DEFAULT_GRAVITY)
+    return gazebo_common.gravity_vector(text.split(), "the '<gravity>' of %s" % path)
 
 
 #

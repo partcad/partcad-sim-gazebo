@@ -500,8 +500,11 @@ def gravity_of(request, world):
     declaration, and must not be: a default there would be explicit in every
     request and beat every scene that ever stated a gravity.
     """
-    gravity = request.get("gravity") or world.get("gravity")
-    return None if not gravity else [float(v) for v in gravity]
+    if request.get("gravity") is not None:
+        return gazebo_common.gravity_vector(request["gravity"], "the export's 'gravity'")
+    if world.get("gravity") is not None:
+        return gazebo_common.gravity_vector(world["gravity"], "the scene's 'gravity'")
+    return None
 
 
 def process(path, request):
