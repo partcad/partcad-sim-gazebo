@@ -596,6 +596,31 @@ def envelope(name, label, brep, location=None):
     return node
 
 
+def test_the_tree_partcad_hands_beside_the_geometry_is_what_is_written(export_world, tmp_path, monkeypatch):
+    """A PartCAD that hands 'shape_tree' is read from it, and its nodes are not decoded again.
+
+    'wrapped' is then the geometry - here a stand-in nothing may touch - and
+    every shape node of the tree carries its own geometry under 'shape'.
+    """
+    import xml.etree.ElementTree as ElementTree
+
+    import ocp_serialize
+
+    def decoded_already(obj):
+        raise AssertionError("a node of 'shape_tree' carries its geometry decoded")
+
+    monkeypatch.setattr(ocp_serialize, "decode_shape", decoded_already)
+    cube = dict(envelope("//p:cube", "cube", b"CUBE"), shape=("shape", b"CUBE"))
+    root = {"name": "//p:bench", "label": "bench", "assembly": [cube]}
+    path = tmp_path / "bench.world"
+
+    result = export_world.process(str(path), {"shape_tree": root, "wrapped": object()})
+
+    assert result["success"], result
+    world = ElementTree.parse(str(path)).getroot().find("world")
+    assert [model.get("name") for model in world.findall("model")] == ["ground_plane", "cube"]
+
+
 def test_a_scene_becomes_a_world_of_one_model_per_object(export_world, tmp_path):
     cube = envelope("//p:cube", "cube", b"CUBE")
     group = {

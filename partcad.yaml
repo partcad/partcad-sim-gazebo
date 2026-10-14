@@ -144,10 +144,10 @@ export:
     desc: |
       SDFormat, the XML Gazebo describes a simulation world in: a `.world` file
       plus the mesh files it references. It is the format a **scene** is
-      exported to (`pc export -S -t sim-gazebo:world`), and it is handed the
-      assembly *tree* itself rather than the geometry it decodes to
-      (`decode: false`) -- one model per object placed in the scene, named,
-      placed and looked up by what the tree says.
+      exported to (`pc export -S -t sim-gazebo:world`), and it is written from
+      the assembly *tree* rather than from the geometry it decodes to -- one
+      model per object placed in the scene, named, placed and looked up by what
+      the tree says.
 
       Not to be confused with the `sdf` *part* type, which is a signed distance
       function and has nothing to do with this.
@@ -161,11 +161,13 @@ export:
     # gets here and is not something pip can answer.
     pythonRequirements:
       - cadquery-ocp==7.9.3.1.1
-    # 'decode: false' -- the exporter walks the assembly envelopes itself.
-    # Decoding them into live geometry would keep the tree's shape but drop
-    # every node's name and label and bake its placement in, leaving nothing to
-    # name, group or place the models by. See 'wrappers/wrapper_export.py' in
-    # PartCAD itself.
+    # For a PartCAD released before 'shape_tree' only:
+    # that is what has it hand this exporter the tree in 'wrapped' rather than
+    # the geometry it decodes to. A newer PartCAD hands every exporter the tree
+    # as 'shape_tree' beside the geometry, reads no 'decode' at all, and passes
+    # this through as a parameter nothing reads. Drop it once 'partcad:' above
+    # requires a release that hands 'shape_tree'. See 'tree_of()' in
+    # export_world.py.
     decode: false
     # The meshes are written by this exporter itself, so it takes the mesh
     # options too.
