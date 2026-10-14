@@ -20,7 +20,7 @@ and its placement is baked in rather than staying readable as data. This
 exporter needs all three, because that is what the models, the links, the poses
 and the properties are built from.
 
-A PartCAD released before 'shape_tree' (0.8.192 and older) hands the tree in
+A PartCAD released before 'shape_tree' hands the tree in
 'wrapped' instead, and only to an exporter that declares ``decode: false`` -
 which is why this one still does, and why both are read: see 'tree_of()'.
 
