@@ -611,7 +611,7 @@ def test_the_tree_partcad_hands_beside_the_geometry_is_what_is_written(export_wo
 
     monkeypatch.setattr(ocp_serialize, "decode_shape", decoded_already)
     cube = dict(envelope("//p:cube", "cube", b"CUBE"), shape=("shape", b"CUBE"))
-    root = {"name": "//p:bench", "label": "bench", "assembly": [cube]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube]}
     path = tmp_path / "bench.world"
 
     result = export_world.process(str(path), {"shape_tree": root, "wrapped": object()})
@@ -629,7 +629,7 @@ def test_a_scene_becomes_a_world_of_one_model_per_object(export_world, tmp_path)
         "location": [[100.0, 0.0, 0.0], [0.0, 0.0, 1.0], 90.0],
         "assembly": [envelope("//p:cyl", "cylinder", b"CYL", [[0.0, 0.0, 10.0], [0.0, 0.0, 1.0], 0.0])],
     }
-    root = {"name": "//p:bench", "label": "bench", "assembly": [cube, group]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube, group]}
 
     result, sdf = exported(export_world, tmp_path / "bench.world", root)
 
@@ -641,10 +641,14 @@ def test_a_scene_becomes_a_world_of_one_model_per_object(export_world, tmp_path)
     models = [model.get("name") for model in world.findall("model")]
     assert models == ["ground_plane", "cube", "group"]
 
-    # A node with a subtree is a model; a leaf inside it is a link.
+    # Every element of a scene is a body, and a body is a model: a group
+    # placed in one is one body, a link holding a shape for each of its parts,
+    # each where the group holds it. The link is never named like its model,
+    # which Gazebo would report in the model's place.
     group_model = world.findall("model")[2]
     assert group_model.find("pose").text.split()[0] == "0.1"  # 100 mm -> 0.1 m
-    assert [link.get("name") for link in group_model.findall("link")] == ["cylinder"]
+    assert [link.get("name") for link in group_model.findall("link")] == ["group_link"]
+    assert group_model.find("link/visual/pose").text.split()[2] == "0.01"
 
     # Meshes in millimetres, referenced with the scale that says so.
     mesh = group_model.find("link/visual/geometry/mesh")
@@ -656,7 +660,7 @@ def test_a_scene_becomes_a_world_of_one_model_per_object(export_world, tmp_path)
 def test_a_shape_used_twice_is_written_once(export_world, tmp_path):
     cube = envelope("//p:cube", "cube", b"CUBE")
     twin = envelope("//p:cube", "cube", b"CUBE", [[10.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0])
-    root = {"name": "//p:bench", "label": "bench", "assembly": [cube, twin]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube, twin]}
 
     result, sdf = exported(export_world, tmp_path / "bench.world", root)
 
@@ -667,7 +671,7 @@ def test_a_shape_used_twice_is_written_once(export_world, tmp_path):
     assert [model.get("name") for model in sdf.find("world").findall("model")] == [
         "ground_plane",
         "cube",
-        "cube_1",
+        "cube-2",
     ]
 
 
@@ -675,6 +679,7 @@ def test_what_a_part_says_about_itself_is_written_rather_than_recomputed(export_
     root = {
         "name": "//p:bench",
         "label": "bench",
+        "kind": "scene",
         "assembly": [envelope("//p:cube", "cube", b"CUBE")],
     }
     properties = {
@@ -716,7 +721,7 @@ def test_a_link_weighs_what_partcad_says_its_part_weighs(export_world, tmp_path)
     So a world Gazebo runs weighs what 'pc info' says, and what the URDF and
     MJCF exports of the same object weigh.
     """
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:ptfe", "ptfe", b"PTFE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:ptfe", "ptfe", b"PTFE")]}
     properties = {"//p:ptfe": {"material": ":ptfe", "physics": dict(PTFE_CUBE)}}
 
     result, sdf = exported(export_world, tmp_path / "bench.world", root, properties=properties)
@@ -754,7 +759,7 @@ def test_a_link_of_several_shapes_is_added_up_by_partcad_s_helper(export_world, 
         "label": "wrist",
         "assembly": [envelope("//p:steel", "wrist/1", b"STEEL"), envelope("//p:foam", "wrist/2", b"FOAM", apart)],
     }
-    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    root = {"name": "//p:arm", "label": "arm", "kind": "scene", "assembly": [wrist]}
     properties = {"//p:steel": {"physics": steel}, "//p:foam": {"physics": foam}}
 
     _result, sdf = exported(export_world, tmp_path / "arm.world", root, properties=properties)
@@ -776,7 +781,7 @@ def test_a_link_that_states_its_own_mass_beats_the_sum_of_its_shapes(export_worl
             envelope("//p:b", "wrist/2", b"B", [[50.0, 0.0, 0.0], [0.0, 0.0, 1.0], 0.0]),
         ],
     }
-    root = {"name": "//p:arm", "label": "arm", "assembly": [wrist]}
+    root = {"name": "//p:arm", "label": "arm", "kind": "scene", "assembly": [wrist]}
     properties = {
         "//p:wrist": {"physics": {"mass": 3.0}},
         "//p:a": {"physics": dict(PTFE_CUBE)},
@@ -790,16 +795,16 @@ def test_a_link_that_states_its_own_mass_beats_the_sum_of_its_shapes(export_worl
 
 def test_a_link_with_no_mass_is_written_without_an_inertial_and_says_so(export_world, tmp_path):
     """A mesh with no solid in it, which nobody weighed: no invented inertia."""
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:scan", "scan", b"SCAN")]}
 
     result, sdf = exported(export_world, tmp_path / "bench.world", root)
 
     assert sdf.find("world/model[@name='scan']/link/inertial") is None
-    assert any("'scan' has no mass" in warning for warning in result["warnings"])
+    assert any("'scan_link' has no mass" in warning for warning in result["warnings"])
 
 
 def test_a_scene_is_written_static_with_a_light_and_a_ground_unless_told_otherwise(export_world, tmp_path):
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
     _result, sdf = exported(export_world, tmp_path / "a.world", root)
     assert sdf.find("world/light") is not None
@@ -825,7 +830,7 @@ def test_the_parts_of_a_model_collide_only_when_asked_to(export_world, tmp_path)
     Which for a stack of blocks exported as one model is the top block falling
     straight through the bottom one: what a simulation asks for is the opposite.
     """
-    root = {"name": "//p:bench", "label": "bench", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
     _result, sdf = exported(export_world, tmp_path / "a.world", root)
     assert sdf.find("world/model[@name='cube']/self_collide") is None
@@ -850,7 +855,7 @@ def test_a_single_shape_is_a_world_of_one_model(export_world, tmp_path):
 
 
 def one_cube():
-    return {"name": "//p:tank", "label": "tank", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
+    return {"name": "//p:tank", "label": "tank", "kind": "scene", "assembly": [envelope("//p:cube", "cube", b"CUBE")]}
 
 
 def test_a_scene_that_states_no_gravity_leaves_gazebo_its_own(export_world, tmp_path):
@@ -938,6 +943,7 @@ def test_a_world_written_here_reads_back_as_the_same_arrangement(export_world, t
     root = {
         "name": "//p:bench",
         "label": "bench",
+        "kind": "scene",
         "assembly": [
             envelope("//p:cube", "cube", b"CUBE"),
             {

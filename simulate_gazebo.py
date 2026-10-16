@@ -8,11 +8,12 @@
 Runs a world under gravity for a while and says where everything ended up.
 
 The world arrives as SDFormat -- PartCAD exported it with this package's own
-exporter, with every model free to move -- so all this does is start the server,
-watch the poses it publishes, and take the same reading twice: once before
-anything has moved and once when the simulated clock reaches ``duration``. That
-pair is what a ``simulate:``'s ``validation:`` expression is handed, and it is
-the whole of what PartCAD requires a simulation plugin to produce.
+exporter, with every free body free to move and the joints of every mechanism in
+it -- so all this does is start the server, watch the poses it publishes, and
+take the same reading twice: once before anything has moved and once when the
+simulated clock reaches ``duration``. That pair is what a ``simulate:``'s
+``validation:`` expression is handed, and it is the whole of what PartCAD
+requires a simulation plugin to produce.
 
 Positions are reported in **millimetres**, PartCAD's unit everywhere, not in the
 metres SDFormat works in. A validation expression is written by whoever wrote the
@@ -813,7 +814,7 @@ def prepare_world(scene_file, warnings):
     """The world to run, and the models whose joints are read in it.
 
     The world as it was handed over when nothing in it has a joint to read -- so
-    a world of free models, which is every world PartCAD exports today, runs
+    a world of free models, which is every scene of parts PartCAD exports, runs
     exactly as it always has -- and otherwise a copy of it with the publishers
     added ('plan_joints'), which 'process' removes again when the run is over.
     The copy is written beside the world rather than anywhere else, because a

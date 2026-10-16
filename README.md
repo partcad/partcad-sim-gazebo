@@ -70,7 +70,8 @@ pc convert scene -t sim-gazebo:world bench      # and write it back out
 
 ## What a run reports
 
-PartCAD exports the scene as a world with every model free to move, hands this
+PartCAD exports the scene as a world with every free body free to move and the
+joints of every mechanism in it (see [Mechanisms](#mechanisms)), hands this
 package the file, and this package runs the server until the *simulated* clock
 reaches `duration`. It then reports where every model was at the start and at
 the end:
@@ -153,7 +154,7 @@ turn and **millimetres** for a move.
 * A joint is reported under its own name, and as **`<model>::<joint>`** where
   another model has a joint of the same name — both of them, so that neither is
   the one the plain name means. A nested model is `outer::inner`.
-* A world with no joints to read — every world PartCAD exports today — reports
+* A world with no joints to read — a scene of parts — reports
   `"joints": {}`, so a validation can walk `after["joints"]` without asking
   first whether it is there.
 
@@ -169,6 +170,79 @@ original, because a world names its meshes relative to where it is, and removed
 when the run ends. A world with nothing to read runs exactly as it was handed
 over. The states arrive every step and each reading takes the one of its own
 simulated instant, so a reading's joints and its bodies are the same moment.
+
+## Mechanisms
+
+The world exporter writes the bodies PartCAD's body rule finds (`kinematics` in
+PartCAD, the rule the MuJoCo plugin and PartCAD's URDF exporter write too), not
+one body per node of geometry:
+
+* every element of a scene is a **`<model>`**, and an assembly placed in one is
+  one model, its root body the model's first link, `<name>_link`;
+* everything inside an assembly is attached: parts welded together are **one
+  `<link>`**, a `<visual>` and a `<collision>` each, and the link's
+  `<inertial>` is their mass, centre of mass and inertia combined; a connection
+  that keeps a degree of freedom is a **`<joint>`** to the link it moves
+  against;
+* an element marked `fixed: true` is welded to the world by a fixed joint to
+  `world`.
+
+Each joint is written as SDFormat's own type wherever SDFormat has one:
+
+| What the joint's free steps are | SDFormat |
+| --- | --- |
+| one turn, limited | `revolute`, `<limit>` in radians |
+| one turn, unlimited | `revolute` with no `<limit>` — **never `continuous`**, which Gazebo's DART builds as fixed |
+| one move | `prismatic`, `<limit>` in metres |
+| turn and move on one axis, coupled by a thread | `screw`, with its pitch |
+| two turns through a point | `universal` (`<axis>`, `<axis2>`) |
+| three turns through a point | `ball` |
+| turn and move on one axis, uncoupled (cylindrical) | `revolute` + `prismatic` through a dummy link |
+| two moves and the turn about their normal (planar) | two `prismatic` + `revolute` through dummy links |
+| floating, inside a tree | three `prismatic` + `ball` through dummy links |
+| anything else | one `revolute` or `prismatic` per freedom, in order, through dummy links |
+
+* **Names.** A joint written as one SDFormat joint keeps PartCAD's name —
+  `<child>-<target>`, or the connection's `joint:` — so
+  `after["joints"]["shoulder_pan"]` reads it. One written as several is
+  `<name>.<parameter>` for each (`nut-bolt.turnZ`, `float-tank.ball`), the name
+  the MuJoCo plugin gives the MuJoCo joint of the same freedom. No two things in
+  a world share a name, which is why a model's first link is not called after
+  the model: Gazebo reports every pose by the bare name, and a link sharing its
+  model's name was reported in the model's place.
+* **Dummy links** weigh a gram, with an inertia of 10⁻⁶ kg·m², have no geometry,
+  and are named after the joint (`<name>_link1`, ...). The export says which
+  joints needed them.
+* **Frames.** Each link is written where its joints put it at **zero**, in its
+  model's frame; a joint's `<pose>` is the frame it turns or slides in, relative
+  to its child link, and its `<axis><xyz expressed_in="...">` is in its parent
+  link. So Gazebo's zero is PartCAD's zero, a limit is the declared one, and a
+  joint reading is PartCAD's value.
+* **Starting values are not written.** SDFormat 1.9 has no starting position
+  (`<axis><initial_position>` went with 1.8, and Gazebo never read it), so a
+  joint that `toParams` starts away from zero starts at zero here, and the
+  export names each one. The MuJoCo plugin does start it there.
+* **Physics.** `damping`, `friction`, `springStiffness` and `springReference`
+  are `<axis><dynamics>`; `maxEffort` and `maxVelocity` are `<limit><effort>`
+  and `<velocity>`. All in SI per radian or per metre; `springReference`, a
+  position of the joint, converts from degrees or millimetres. They are written
+  on every axis but one another axis moves (a screw's move). A ball has no
+  axis, so its physics and the bounds of its turns are reported, not written;
+  so are soft limits and anything else a joint states.
+* **Screws.** `<thread_pitch>`, in radians a metre and positive for a
+  left-handed thread, as Harmonic reads a 1.9 file; `<screw_thread_pitch>`, in
+  metres a turn, from `version: "1.10"` on.
+* **Mimics** are `<mimic>` from `version: "1.11"` on, and reported before it.
+  Gazebo Harmonic reads one and does not enforce it: its DART has no mimic
+  constraint, so a mimicking joint moves freely there either way.
+* **`static`** (the export's default, for a file to look at) welds every body
+  nothing holds: a model with nothing moving in it is `<static>`, and the root of
+  a mechanism gets a fixed joint to `world`, so a pendulum exported on its own
+  still swings. A run asks for `static: false`. **`flatten` is gone**, and
+  reported when it is passed.
+* **`self_collide`** (on for a run) lets the links of one model collide.
+  Gazebo's DART never collides the two links of one joint, but the two ends of a
+  chain through dummy links are not that, and with it on those can.
 
 ## Snapshots
 
@@ -363,6 +437,16 @@ docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 --entrypoint bas
     'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \
      && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py test_partition.py'
 ```
+
+`test_export_joints.py` builds mechanisms with PartCAD's own ASSY code, a
+stand-in for every part's geometry, and checks every row of the table above:
+the joints written, under the names they are written under, and every link
+where PartCAD's `kinematics` puts its body — read back by a forward kinematics
+of SDFormat written from its specification, at zero and moved. Its last tests
+need a Gazebo and `partcad` both: every row passes `gz sdf -k`, a bar released
+horizontal on a hinge passes the bottom at √(2mgd/I) and swings with the period
+4K(sin 45°)√(I/mgd) of a right-angle swing, and a nut on a screw moves 10 mm a
+turn. In the image, `pip install -q pytest numpy partcad` and run it as above.
 
 `test_partition.py` checks the environment each run starts its programs in, with
 nothing but the standard library, and then runs two worlds of one name side by
