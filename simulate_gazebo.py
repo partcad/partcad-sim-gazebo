@@ -345,7 +345,12 @@ class Programs:
         running = [p for p in self.started if p.poll() is None]
         for process in self.started:
             # Every group, the leader's exit notwithstanding: what it started
-            # may still be in it.
+            # may still be in it -- a server that died leaving its own server
+            # behind. That can only reach another group if the leader's number
+            # was handed out again, which POSIX does not do while anything is
+            # still in its group; with nothing left in it, the number is free,
+            # and a new group of that number started in the moments since is
+            # the risk taken, in exchange for not leaving a live server behind.
             _signal_group(process, signal.SIGTERM)
         deadline = time.monotonic() + grace
         for process in running:
