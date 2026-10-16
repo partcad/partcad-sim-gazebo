@@ -59,14 +59,30 @@ over with that system added; see 'plan_joints' and 'JointStream'.
 partition nobody else is in, so that two runs on one machine -- two worlds of
 the same name, which is every pair of runs of one simulation -- do not read
 each other's poses and joints; see 'run_environment'.
+
+**Nothing is waited for blindly.** A server that dies says nothing on the topic
+its subscriber is waiting on, and neither does a server that hangs while it
+starts, or one publishing in a partition nobody is listening in -- the
+subscriber just goes on waiting, and so did this script, for ever. So what the
+server publishes is read on a thread of its own, and the run is checked while it
+waits: a server that has exited fails the run at once, with its exit status and
+the end of what it wrote (see 'Programs'); a first message that does not come
+within ``startup_timeout`` fails it saying where it was listening; and every
+wait -- for poses, for joint states, for the version -- is inside the run's
+budget, ``timeout``, which PartCAD hands every run and stops it at. This script
+stops a little before that, so that what it reports says how far the run got.
+Every program it starts is in a process group of its own and is stopped with
+everything it started on every way out, and the world copy with it.
 """
 
 import collections
 import glob
 import math
 import os
+import queue
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -242,6 +258,250 @@ def run_environment(environment=None, token=None):
     for name in PARTITION_VARIABLES:
         result[name] = partition
     return result, partition
+
+
+# How long a run may take, in wall-clock seconds, when PartCAD does not say: the
+# bound this script always had. PartCAD hands every run its budget as 'timeout'.
+DEFAULT_TIMEOUT = 300.0
+
+# How much of that budget is left unused, so that the run stops itself and says
+# how far it got before PartCAD stops it and can say only that it did not
+# finish: a tenth of it, at least one second and at most thirty.
+BUDGET_MARGIN = 0.1
+BUDGET_MARGIN_MIN = 1.0
+BUDGET_MARGIN_MAX = 30.0
+
+# How long the server may take to publish its first pose, in wall-clock seconds,
+# unless 'startup_timeout' says otherwise. Loading a world and its meshes, and
+# a first start in a container, take seconds; a server that has said nothing in
+# two minutes is one that will not.
+STARTUP_TIMEOUT = 120.0
+
+# How often a wait looks up from the stream it is reading to check on the
+# server, in seconds.
+POLL = 0.25
+
+# How long a program is given to stop after being asked, in seconds, before it
+# is killed with everything it started.
+GRACE = 5.0
+
+# How much of what the server wrote to standard error a failure carries.
+STDERR_LINES = 30
+
+
+def positive(value):
+    """'value' as a positive, finite number of seconds, or None."""
+    if isinstance(value, bool):
+        return None
+    try:
+        value = float(value)
+    except (TypeError, ValueError):
+        return None
+    return value if math.isfinite(value) and value > 0 else None
+
+
+class Deadline:
+    """The instant this run gives up, from the budget it was handed and when it started."""
+
+    def __init__(self, budget, started=None):
+        self.started = time.monotonic() if started is None else started
+        self.budget = budget
+        margin = min(BUDGET_MARGIN_MAX, max(BUDGET_MARGIN_MIN, BUDGET_MARGIN * budget))
+        self.at = self.started + (budget - margin if budget > margin else budget / 2.0)
+
+    def remaining(self):
+        return max(0.0, self.at - time.monotonic())
+
+    def passed(self):
+        return time.monotonic() >= self.at
+
+    def elapsed(self):
+        return time.monotonic() - self.started
+
+
+class Programs:
+    """Every program a run starts, each in a process group of its own, all stopped together.
+
+    A group of its own so that stopping it stops what it started too: 'gz' is a
+    front end, and the server it runs or the tool it hands a topic to may well
+    be a process of its own. Stopped on every way out of the run -- asked
+    first, killed with its whole group after 'GRACE' seconds -- so that nothing
+    outlives it to hold the run's output open or a partition busy.
+    """
+
+    def __init__(self):
+        self.started = []
+
+    def start(self, command, **options):
+        if os.name == "nt":
+            options.setdefault("creationflags", getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0))
+        else:
+            options.setdefault("start_new_session", True)
+        process = subprocess.Popen(command, **options)
+        self.started.append(process)
+        return process
+
+    def stop(self, grace=GRACE):
+        running = [p for p in self.started if p.poll() is None]
+        for process in self.started:
+            # Every group, the leader's exit notwithstanding: what it started
+            # may still be in it.
+            _signal_group(process, signal.SIGTERM)
+        deadline = time.monotonic() + grace
+        for process in running:
+            _wait(process, max(0.0, deadline - time.monotonic()))
+        for process in self.started:
+            _signal_group(process, getattr(signal, "SIGKILL", signal.SIGTERM))
+            _wait(process, 1.0)
+        for process in self.started:
+            for stream in (getattr(process, "stdout", None), getattr(process, "stderr", None)):
+                try:
+                    if stream is not None and hasattr(stream, "close"):
+                        stream.close()
+                except OSError:
+                    pass
+
+
+def _wait(process, seconds):
+    """Wait up to 'seconds' for 'process' to end, and reap it if it has."""
+    wait = getattr(process, "wait", None)
+    if wait is None:
+        return
+    try:
+        wait(timeout=seconds)
+    except subprocess.TimeoutExpired:
+        pass
+
+
+def _signal_group(process, sig):
+    """Send 'sig' to the process group 'process' leads; on Windows, take its tree."""
+    pid = getattr(process, "pid", None)
+    if pid is None:
+        return
+    if os.name == "nt":
+        if sig == signal.SIGTERM and process.poll() is None:
+            try:
+                process.terminate()
+            except OSError:
+                pass
+            return
+        try:
+            subprocess.run(
+                ["taskkill", "/F", "/T", "/PID", str(pid)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=30,
+            )
+        except (OSError, subprocess.SubprocessError):
+            pass
+        return
+    try:
+        os.killpg(pid, sig)
+    except (OSError, ProcessLookupError):
+        pass
+
+
+_ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+
+
+class Lines:
+    """The end of what a program writes on a stream, read on a thread so the program never blocks on it."""
+
+    def __init__(self, stream, keep=STDERR_LINES):
+        self.kept = collections.deque(maxlen=keep)
+        self.thread = None
+        if stream is not None and not isinstance(stream, (str, bytes)) and hasattr(stream, "__iter__"):
+            self.thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
+            self.thread.start()
+
+    def _read(self, stream):
+        try:
+            for line in stream:
+                # Gazebo colours its console even into a pipe; a message
+                # quoted in a report is read, not displayed.
+                self.kept.append(_ANSI.sub("", line.rstrip("\n")))
+        except (OSError, ValueError):
+            pass
+
+    def tail(self, wait=0.5):
+        """What has been kept, once the stream has had 'wait' seconds to finish."""
+        if self.thread is not None:
+            self.thread.join(wait)
+        return "\n".join(line for line in self.kept if line.strip())
+
+
+# What 'Messages.next' hands back once the stream has ended.
+ENDED = object()
+
+
+class Messages:
+    """The messages of a 'gz topic -e' stream, read on a thread of their own.
+
+    So that waiting for the next one is a wait with a bound, rather than a read
+    that returns only when the subscriber says something -- which a subscriber
+    whose server has died, or never started, never does.
+    """
+
+    def __init__(self, stream):
+        self.queue = queue.Queue()
+        self.count = 0
+        threading.Thread(target=self._read, args=(stream,), daemon=True).start()
+
+    def _read(self, stream):
+        try:
+            for text in messages(stream):
+                self.queue.put(text)
+        except (OSError, ValueError):
+            pass
+        finally:
+            self.queue.put(ENDED)
+
+    def next(self, timeout):
+        """The next message, ENDED once there will be no more, or None if 'timeout' passed first."""
+        try:
+            text = self.queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+        if text is not ENDED:
+            self.count += 1
+        return text
+
+
+def ended_how(returncode):
+    """How a program ended, in words: its exit status, or the signal that killed it."""
+    if returncode is not None and returncode < 0:
+        try:
+            return "killed by signal %d (%s)" % (-returncode, signal.Signals(-returncode).name)
+        except ValueError:
+            return "killed by signal %d" % -returncode
+    return "exit status %s" % returncode
+
+
+def progress(world, before, after, count, duration):
+    """What had been received when a run failed, for the message it fails with."""
+    if before is None:
+        return "No pose of world '%s' had been received." % world
+    return "%d pose messages of world '%s' had been received, the last at t = %.3g s of the %.3g s asked for." % (
+        count,
+        world,
+        after["time"],
+        duration,
+    )
+
+
+def server_died(simulator, said, world, before, after, count, duration):
+    """The failure a run whose server exited fails with."""
+    head = (
+        "Gazebo published no poses for world '%s': its server stopped before the first one (%s)."
+        % (world, ended_how(simulator.poll()))
+        if before is None
+        else "Gazebo's server stopped before the run was over (%s). %s"
+        % (ended_how(simulator.poll()), progress(world, before, after, count, duration))
+    )
+    tail = said.tail()
+    if tail:
+        return "%s The end of what the server wrote:\n%s" % (head, tail)
+    return "%s The server wrote nothing on standard error." % head
 
 
 def world_name(path):
@@ -1045,15 +1305,18 @@ def fill(reading, streams, warnings, patience=PATIENCE):
 
 
 def process(path, request):
+    started = time.monotonic()
     (server, server_args, topic_command), environment = locate_gazebo()
     # What the server and every subscriber run in: this run's own partition.
     # Not what '_version' runs in, which talks to nobody.
-    run_env, _partition = run_environment(environment)
+    run_env, partition = run_environment(environment)
 
     scene_file = request["scene_file"]
     duration = float(request.get("duration") or 10.0)
     samples = int(request.get("samples") or 0)
-    timeout = float(request.get("timeout") or 300.0)
+    # The run's budget: PartCAD's, handed to every run, or this script's own.
+    deadline = Deadline(positive(request.get("timeout")) or DEFAULT_TIMEOUT, started)
+    startup = positive(request.get("startup_timeout")) or STARTUP_TIMEOUT
     world = request.get("world_name") or world_name(scene_file)
     topic = "/world/%s/pose/info" % world
     warnings = []
@@ -1066,26 +1329,29 @@ def process(path, request):
     if timestep:
         command += ["-z", str(1.0 / float(timestep))]
 
-    # The subscriber first. It is the thing that has to be listening before the
-    # server starts publishing; the other way round loses the opening reading,
-    # which is the one 'before' is.
-    watcher = subprocess.Popen(
-        [server, topic_command, "-e", "-t", topic],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL,
-        text=True,
-        bufsize=1,
-        env=run_env,
-    )
+    programs = Programs()
     simulator = None
+    said = Lines(None)
     # The first message and the last, kept whole for the snapshots: a reading
     # keyed by name is enough for a validation and not for a picture, which
     # has to know which link of which model each pose belongs to.
     first = last = None
-    joint_watchers = []
     streams = []
     run_file = scene_file
     try:
+        # The subscriber first. It is the thing that has to be listening before
+        # the server starts publishing; the other way round loses the opening
+        # reading, which is the one 'before' is.
+        watcher = programs.start(
+            [server, topic_command, "-e", "-t", topic],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1,
+            env=run_env,
+        )
+        poses = Messages(watcher.stdout)
+
         # The world as handed over, or a copy of it that publishes its joints.
         # Made inside the 'try' whose 'finally' removes it, so that nothing
         # that can fail lies between the two and leaves it behind.
@@ -1095,29 +1361,86 @@ def process(path, request):
         # A subscriber for the joints of each model that has any, listening
         # before the server starts for the reason the one above is.
         for model in joint_models:
-            joint_watchers.append(
-                subprocess.Popen(
-                    [server, topic_command, "-e", "-t", model.topic],
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.DEVNULL,
-                    text=True,
-                    bufsize=1,
-                    env=run_env,
-                )
+            joint_watcher = programs.start(
+                [server, topic_command, "-e", "-t", model.topic],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env=run_env,
             )
             streams.append(JointStream(model))
-            threading.Thread(target=streams[-1].follow, args=(joint_watchers[-1].stdout,), daemon=True).start()
+            threading.Thread(target=streams[-1].follow, args=(joint_watcher.stdout,), daemon=True).start()
 
-        simulator = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=run_env)
+        simulator = programs.start(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=run_env)
+        # Read as it comes, so that a server with a lot to say never blocks on
+        # a full pipe, and kept, so that a server that dies is quoted.
+        said = Lines(simulator.stderr)
+
+        def patience():
+            """How long a joint reading may wait: not past the deadline, and not at all for a dead server."""
+            return 0.0 if simulator.poll() is not None else min(PATIENCE, deadline.remaining())
 
         before = None
         after = None
         trace = []
         every = duration / (samples + 1) if samples > 0 else None
         next_sample = every
-        deadline = time.time() + timeout
+        waiting_since = time.monotonic()
+        first_by = min(deadline.at, waiting_since + startup)
 
-        for text in messages(watcher.stdout):
+        def out_of_time():
+            """The failure a run that has waited as long as it may fails with, or None."""
+            if before is None and time.monotonic() >= first_by:
+                tail = said.tail(0)
+                return (
+                    "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing"
+                    " to report: nothing came on '%s' in the transport partition '%s'. A server that hangs while"
+                    " it loads the world, or one publishing in another partition, looks like this. Raise"
+                    " 'startup_timeout' if this machine is simply slow to start one.%s"
+                    % (
+                        world,
+                        time.monotonic() - waiting_since,
+                        topic,
+                        partition,
+                        (" The server wrote:\n%s" % tail) if tail else "",
+                    )
+                )
+            if deadline.passed():
+                return (
+                    "Gazebo did not reach %.3g s of simulated time within %.0f s of waiting (the run's budget is"
+                    " %.0f s). %s Raise 'timeout' if this machine is simply slow."
+                    % (
+                        duration,
+                        deadline.elapsed(),
+                        deadline.budget,
+                        progress(world, before, after, poses.count, duration),
+                    )
+                )
+            return None
+
+        while True:
+            # On every turn, whatever arrives: a stream of messages that never
+            # says anything this run reads is as good as no stream at all.
+            late = out_of_time()
+            if late:
+                raise Exception(late)
+            text = poses.next(min(POLL, max(0.01, deadline.remaining())))
+            if text is None or text is ENDED:
+                # Nothing new: the server is either working, or never will be.
+                if simulator.poll() is not None:
+                    raise Exception(server_died(simulator, said, world, before, after, poses.count, duration))
+                if text is ENDED:
+                    raise Exception(
+                        "Gazebo's pose subscriber ('%s %s -e') stopped (%s) while the server was still running. %s"
+                        % (
+                            server,
+                            topic_command,
+                            ended_how(watcher.poll()),
+                            progress(world, before, after, poses.count, duration),
+                        )
+                    )
+                continue
             message = parse_message(text)
             reading = snapshot(message)
             if not reading["bodies"]:
@@ -1125,49 +1448,26 @@ def process(path, request):
             if before is None:
                 before = reading
                 first = message
-                fill(before, streams, warnings)
+                fill(before, streams, warnings, patience())
             after = reading
             last = message
             for stream in streams:
                 stream.forget_before(reading["time"])
             if next_sample is not None and reading["time"] >= next_sample:
-                fill(reading, streams, warnings)
+                fill(reading, streams, warnings, patience())
                 trace.append(reading)
                 next_sample += every
             if reading["time"] >= duration:
                 break
-            if time.time() > deadline:
-                raise Exception(
-                    "Gazebo did not reach %.3gs of simulated time within %.0fs of waiting "
-                    "(it reached %.3gs). Raise 'timeout' if this machine is simply slow."
-                    % (duration, timeout, reading["time"])
-                )
-            if simulator.poll() is not None:
-                break
 
-        if before is None:
-            stderr = ""
-            if simulator is not None and simulator.poll() is not None and simulator.stderr is not None:
-                stderr = simulator.stderr.read() or ""
-            raise Exception(
-                "Gazebo published no poses for world '%s', so there is nothing to report. "
-                "%s%s" % (world, "The server said: " if stderr.strip() else "", stderr.strip())
-            )
         # Here rather than as the loop takes it, because which reading is the
         # last is only known once the loop is over -- and here rather than
         # after it, because the server is still up and still publishing, and
         # the joint states of that instant may still be on their way. Unless it
         # is not, in which case what has arrived is all there will be.
-        fill(after, streams, warnings, PATIENCE if simulator.poll() is None else 0.0)
+        fill(after, streams, warnings, patience())
     finally:
-        for process_handle in [simulator, watcher] + joint_watchers:
-            if process_handle is None or process_handle.poll() is not None:
-                continue
-            process_handle.terminate()
-            try:
-                process_handle.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process_handle.kill()
+        programs.stop()
         if run_file != scene_file:
             try:
                 os.remove(run_file)
@@ -1181,7 +1481,7 @@ def process(path, request):
         # Beside the two PartCAD requires: what this run actually was, so that a
         # report of a failed validation says what it was a validation of.
         "simulator": "gazebo",
-        "version": _version([server] + list(server_args), environment),
+        "version": _version([server] + list(server_args), environment, min(30.0, max(1.0, deadline.remaining()))),
         "world": world,
         "duration": duration,
         "reached": after["time"],
@@ -1201,15 +1501,16 @@ def process(path, request):
     return result
 
 
-def _version(command, environment=None):
+def _version(command, environment=None, timeout=30.0):
     """What this Gazebo calls itself, for the record. Never a reason to fail.
 
     Asked of the server subcommand ('gz sim --versions'): 'gz --versions' on its
-    own answers with the tool's usage text rather than a version.
+    own answers with the tool's usage text rather than a version. Within what is
+    left of the run's budget, at most 'timeout' seconds.
     """
     try:
         answer = subprocess.run(
-            list(command) + ["--versions"], capture_output=True, text=True, timeout=30, env=environment
+            list(command) + ["--versions"], capture_output=True, text=True, timeout=timeout, env=environment
         )
         printed = (answer.stdout or answer.stderr or "").strip().splitlines()
         return printed[0].strip() if printed else None
