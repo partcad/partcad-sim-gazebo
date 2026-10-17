@@ -94,7 +94,7 @@ judgement in that sentence belongs to the package being simulated.
 The clock is read out of the messages rather than off the wall, which matters:
 `gz sim -r` runs at a real-time factor of about one, and "about" is not something
 a validation should depend on. Wall-clock time is only the `timeout` that stops a
-run which is not progressing at all.
+run which is not progressing at all (see "When a run goes wrong").
 
 Every run has a Gazebo transport **partition** of its own, and the server and
 everything that reads from it are started in it. Gazebo names its topics after
@@ -238,11 +238,49 @@ of one `simulate:` entry (per simulation).
 | `duration` | `10.0` | Seconds of simulated time to run for. |
 | `timestep` | Gazebo's | Integration step, in seconds. |
 | `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run, by writing it into the world before Gazebo loads it; unset, the run is under the scene's, or SDFormat's `[0, 0, -9.8]` when the scene states none. |
-| `timeout` | `300.0` | Wall-clock seconds to wait for the server before giving up. |
+| `timeout` | PartCAD's | Wall-clock seconds the whole run may take. PartCAD works it out and hands it to every run; `300.0` where it does not. See below. |
+| `startup_timeout` | `120.0` | Wall-clock seconds the server may take to publish its first pose. |
 | `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`. |
 
 The reader and the writer take parameters of their own; `partcad.yaml` lists
 each one beside what it does.
+
+## When a run goes wrong
+
+A Gazebo run is several programs -- the server, a `gz topic -e` for the poses,
+and one for the joints of each model that has any -- and every one of them can
+wait for ever on another. A subscriber whose server has died hears nothing and
+says nothing; so does one whose server hangs while it loads the world, or
+publishes in another transport partition. So nothing here waits blindly:
+
+- **A server that dies fails the run at once**, whenever it dies, with its exit
+  status and the end of what it wrote, and with how far the run had got. A world
+  the server refuses -- Harmonic exits, with status 0, on two links of one
+  name -- used to leave the run waiting for its first pose for ever:
+
+  ```text
+  Gazebo published no poses for world 'w': its server stopped before the first one (exit status 0).
+  The end of what the server wrote:
+  [Err] [Server.cc:86] Error Code 2: Msg: link with name[l] already exists.
+  [Err] [Server.cc:86] Error Code 9: Msg: Failed to load a world.
+  ```
+
+- **A first pose that does not come within `startup_timeout`** fails the run,
+  saying which topic it listened on and in which partition.
+- **Every wait is inside the run's budget**, `timeout`: for poses, for joint
+  states (each joint stream is waited for at most ten seconds, and once for one
+  that has said nothing), and for `gz sim --versions`. PartCAD hands every run
+  its budget and stops the run when it is spent; this script stops a tenth of
+  it earlier -- at least a second, at most thirty -- and says how far it got:
+  `Gazebo did not reach 10 s of simulated time within 270 s of waiting (the run's
+  budget is 300 s). 812 pose messages of world 'w' had been received, the last
+  at t = 3.2 s of the 10 s asked for.`
+- **Nothing outlives the run.** Every program is started in a process group of
+  its own, and on every way out -- an answer, a failure, an exception -- each
+  group is asked to stop and killed five seconds later, with whatever it
+  started; the world's copy with the joint publishers in it is removed. The
+  server's standard error is read as it comes, so a server with a lot to say
+  never blocks on a full pipe.
 
 ## Friction is a fact about the material
 
@@ -340,6 +378,13 @@ cannot hold: nothing about the part is lost by a world that has no fluid in it.
 ```shell
 pytest
 ```
+
+`test_safety.py` proves each of the nets in "When a run goes wrong" with a fake
+`gz` -- a few lines of Python found through `PC_GZ` -- that dies before its first
+pose, hangs while it starts, publishes and then dies, or is too slow for its
+budget, and checks that every program it was run as is gone afterwards. It needs
+nothing but the standard library and a POSIX system. Its last test runs a world a
+real Gazebo refuses, and is skipped without one, like the ones below.
 
 `test_simulate_gazebo.py` needs nothing but the standard library and says why an
 end-to-end run is not among what it checks. `test_snapshot.py` needs numpy, and

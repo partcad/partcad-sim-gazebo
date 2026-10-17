@@ -315,10 +315,21 @@ simulation:
     # that wants another for one run says `params: {gravity: [0, 0, -1.62]}`.
     # gravity: [0.0, 0.0, -9.81]
     #
-    # How long to wait, in wall-clock seconds, for the server to answer. A world
-    # is stepped as fast as the machine manages, so this is about the machine
-    # rather than about the simulation.
-    timeout: 300.0
+    # How long the whole run may take, in wall-clock seconds. Not stated here,
+    # so that it is PartCAD's to work out: the larger of five minutes and ten
+    # seconds for each simulated one, unless a 'simulate:' says
+    # 'params: {timeout: ...}' (or the machine says 'simulation.timeout').
+    # PartCAD hands it to the script as 'timeout' and stops the run when it is
+    # spent; the script stops itself a little before, saying how far it got.
+    # Where PartCAD hands none, the script waits 300 seconds. A world is stepped
+    # at about real time, so this is about the machine and the duration rather
+    # than about the simulation.
+    # timeout: 300.0
+    #
+    # How long the server may take to publish its first pose, in wall-clock
+    # seconds. A server that has said nothing by then is one that hung while it
+    # loaded the world, or is publishing where nobody listens.
+    startup_timeout: 120.0
     # Report where every model is at each of these many evenly spaced instants,
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
     # which is what a validation reads.
