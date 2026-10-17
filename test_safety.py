@@ -248,6 +248,22 @@ def test_a_stream_of_messages_that_say_nothing_is_no_first_pose(gazebo, tmp_path
     assert_nothing_outlived_the_run(gazebo)
 
 
+def test_a_names_file_that_matches_no_pose_says_so_rather_than_that_nothing_came(gazebo, tmp_path):
+    """A stale sidecar reads every message as empty; the failure has to point at it, not at the server."""
+    naming = pytest.importorskip("naming")
+    gazebo("ok")
+    (tmp_path / "run").mkdir()
+    naming.write_sidecar(tmp_path / "run" / "scene.world", "world", {}, {"gone": {"path": ["gone", "link"]}})
+
+    _, error, took = run(tmp_path, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "none named the model and link of a body the names file" in message
+    assert "export the world again" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
 def test_a_server_that_publishes_and_then_dies_fails_saying_how_far_it_got(gazebo, tmp_path):
     gazebo("publish-then-die")
 

@@ -1496,9 +1496,20 @@ def process(path, request):
         next_sample = every
         waiting_since = time.monotonic()
         first_by = min(deadline.at, waiting_since + startup)
+        # Pose messages that came but named no body this run reads: with a
+        # sidecar, ones in which no body's model and link appear once each.
+        unread = 0
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""
+            if before is None and unread and names.bodies and time.monotonic() >= first_by:
+                return (
+                    "Gazebo published %d pose messages for world '%s' within %.0f s of being started, and none"
+                    " named the model and link of a body the names file beside '%s' lists once each, so there is"
+                    " nothing to report. That file does not belong to the world that was loaded, or the world"
+                    " names a body's model or link twice; export the world again."
+                    % (unread, shown, time.monotonic() - waiting_since, scene_file)
+                )
             if before is None and time.monotonic() >= first_by:
                 tail = said.tail(0)
                 return (
@@ -1552,6 +1563,7 @@ def process(path, request):
             message = parse_message(text)
             reading = snapshot(message, names)
             if not reading["bodies"]:
+                unread += 1
                 continue
             if before is None:
                 before = reading

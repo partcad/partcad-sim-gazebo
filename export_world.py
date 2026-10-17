@@ -1282,6 +1282,8 @@ def process(path, request):
             planner.bodies(),
             dict(planner.reported),
         )
+    else:
+        naming.remove_sidecar(path)
 
     return {
         "success": True,
