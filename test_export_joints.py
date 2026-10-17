@@ -798,7 +798,7 @@ def test_in_gazebo_a_nut_on_a_screw_moves_as_its_thread_says(gazebo, tmp_path, s
     import simulate_gazebo
 
     tree = in_a_scene(rig(tmp_path, "threadStep: 10\nmotion: screw"), [[0.0, 0.0, 800.0], [0.0, 0.0, 1.0], 0.0])
-    _result, path, _sdf = export(export_world, tmp_path, tree, static=False, ground_plane=False)
+    _result, path, _sdf = export(export_world, tmp_path, tree, static=False, ground_plane=False, names_file=True)
     result = simulate_gazebo.process(str(tmp_path), {"scene_file": str(path), "duration": 0.5})
 
     arm = kinematics.bodies(tree).by_name("arm")
@@ -811,8 +811,8 @@ def test_in_gazebo_a_nut_on_a_screw_moves_as_its_thread_says(gazebo, tmp_path, s
     values[move.follows] = turned
     values[move.index] = move.ratio * turned + move.offset
     expected = kinematics.compose(kinematics.bodies(tree).by_name("subject").world, arm.joint.location(values))
+    # In the world's frame, as every body is reported: the nut's link composed
+    # with the model it is in, which the scene placed 800 mm up.
     fallen = result["after"]["bodies"]["arm"]["pos"]
-    print(
-        "screw: turned %.2f deg, the nut at %s mm in its model, PartCAD puts it at %s" % (turned, fallen, expected[1])
-    )
-    assert fallen[2] == pytest.approx(expected[1][2] - 800.0, abs=0.2)
+    print("screw: turned %.2f deg, the nut at %s mm, PartCAD puts it at %s" % (turned, fallen, expected[1]))
+    assert fallen[2] == pytest.approx(expected[1][2], abs=0.2)

@@ -53,14 +53,24 @@ exporter writes what it returns:
     combination -- a chain of those through dummy links (see 'DUMMY_MASS'),
     which is reported.
 
-**Names.** One name is never two things in one world: no link is named like a
-model, and no joint like a link. SDFormat requires the second within a model,
-and Gazebo needs the first: it reports every pose by the entity's bare name, and
-a model whose link shared its name was reported where its link sits in it -- at
-the origin, for ever. A joint written as one SDFormat joint keeps PartCAD's
-name, which is what a validation reads; one written as several is
-'<name>.<parameter>' for each, which is the name the MJCF exporter gives the
-MuJoCo joint of the same freedom.
+**Names.** Every name is PartCAD's wherever SDFormat can hold it, and is
+otherwise transcoded by PartCAD's 'naming' under SDFormat's own rules (see
+'SDF_NAMES'): a scene called 'world' -- which is what PartCAD's default world is
+called -- is still 'world' in PartCAD, and a world SDFormat can load under
+another name here. One name is never two things in one world: no link is named
+like a model, and no joint like a link. SDFormat requires the second within a
+model, and Gazebo needs the first: it reports every pose by the entity's bare
+name, and a model whose link shared its name was reported where its link sits
+in it -- at the origin, for ever. So the models, links and joints of a world
+share one transcoder, and PartCAD's names are claimed in it before anything
+this exporter names itself (a model's '<model>_link', a dummy link, the ground
+plane), so that those are the ones told apart. A joint written as one SDFormat
+joint keeps PartCAD's name, which is what a validation reads; one written as
+several is '<name>.<parameter>' for each, which is the name the MJCF exporter
+gives the MuJoCo joint of the same freedom. With ``names_file: true`` -- what the
+simulation asks for -- which name each became, and where each body and joint is
+(its model and its link), is written beside the world as '<file>.names.json',
+and the run reports under PartCAD's names by reading it.
 
 **Frames.** A link's frame is its body's own, so a part sits in its link where
 the body holds it and the inertial is the body's as PartCAD combined it. Every
@@ -138,6 +148,7 @@ import pyexpat  # noqa: F401
 sys.path.append(os.path.dirname(__file__))
 import gazebo_common  # noqa: E402
 import kinematics  # noqa: E402
+import naming  # noqa: E402
 import ocp_serialize  # noqa: E402
 import urdf_common  # noqa: E402
 
@@ -175,15 +186,28 @@ MEDIUM_NOT_WRITTEN = (
     "a vacuum"
 )
 
-# The one name SDFormat reserves that 'sanitize_name' can produce (the others
-# begin and end with '__', which it strips): what a joint says it is attached to
-# when it is attached to the world. Nothing in a world may be called it, the
-# world included.
-RESERVED_NAME = "world"
-
-# SDFormat names end up as XML attributes and as scoped names joined by '::',
-# so anything outside this set is replaced.
-_UNSAFE_NAME = re.compile(r"[^A-Za-z0-9_.-]+")
+# What an SDFormat name may be, declared here because it is SDFormat's (see
+# PartCAD's 'wrappers/naming.py'). From libsdformat itself ('isReservedName'
+# and 'recursiveSiblingNoDoubleColonInNames'): 'world', and every name that
+# begins and ends with '__' ('__model__', '__root__'), are reserved for a world,
+# a model, a link, a joint and a frame alike, and no element's name may contain
+# '::', which is how SDFormat scopes one name inside another. Names are compared
+# as written. A model's name must differ from every other frame-defining
+# element's in its scope, a link's and a joint's from every other in their model;
+# one transcoder for the whole world (see 'Names' above) satisfies all of it.
+# The alphabet is narrower than SDFormat's, for Gazebo's sake: a world's and a
+# model's names are parts of transport topics ('/world/<world>/pose/info',
+# '/world/<world>/model/<model>/joint_state'), where gz-transport refuses
+# whitespace, '~', '@', '//' and ':=' and rewrites what it refuses -- so the run
+# would listen on a topic the server is not publishing on. ASCII letters,
+# digits, '_', '.' and '-' are safe in every one of those places.
+SDF_NAMES = naming.Rules(
+    "SDFormat",
+    allowed=re.compile(r"[A-Za-z0-9_.-]"),
+    forbidden=("::",),
+    reserved=("world",),
+    reserved_patterns=(r"__.*__",),
+)
 
 # PartCAD property -> where under '<link>' it is stated, and how to write it.
 # The path is relative to the link; the writer creates whatever is missing.
@@ -305,45 +329,13 @@ def _bool_text(value):
 
 
 def sanitize_name(name, fallback):
-    """An SDFormat-safe name derived from a PartCAD name.
+    """An SDFormat-safe name derived from a PartCAD name, uniqueness and reservation aside.
 
     PartCAD names carry package paths and ':' separators ("//pub/examples:logo")
     and the '/' that groups a link's own shapes, none of which belong in an
     SDFormat name -- '::' is its scope separator and a bare '/' has no meaning.
     """
-    name = _UNSAFE_NAME.sub("_", str(name or "")).strip("_")
-    return name or fallback
-
-
-class NameAllocator:
-    """Hands out unique names, since SDFormat requires them within a scope.
-
-    Unique across the whole document rather than per scope: that satisfies the
-    requirement everywhere at once, and it keeps the names readable in a
-    simulator's entity tree and in what a run reports, where Gazebo states
-    every entity by its bare name. The models, links and joints of a world
-    share one, so that no two of them answer to one name.
-
-    A name already taken gets '<separator><n>', counting from 'start': the
-    world's own names are 'cube-2' after 'cube', as 'kinematics' names a
-    second body and the core a second joint of one name, and the meshes are
-    'cube_1.stl' after 'cube.stl', as they always were.
-    """
-
-    def __init__(self, separator="_", start=1, reserved=()):
-        self.used = set(reserved)
-        self.separator = separator
-        self.start = start
-
-    def take(self, name, fallback="model"):
-        base = sanitize_name(name, fallback)
-        candidate = base
-        suffix = self.start
-        while candidate in self.used:
-            candidate = "%s%s%d" % (base, self.separator, suffix)
-            suffix += 1
-        self.used.add(candidate)
-        return candidate
+    return naming.transcode(SDF_NAMES, name, fallback)
 
 
 def sub(parent, path, text=None):
@@ -419,7 +411,7 @@ def mesh_reference(shape, node, link_name, state):
     key = node.get(ocp_serialize.KEY_BREP)
     mesh_file = state["meshes"].get(key)
     if mesh_file is None:
-        mesh_name = state["mesh_names"].take(node.get("label") or link_name, "mesh")
+        mesh_name = state["mesh_names"].derive(node.get("label") or link_name, "mesh")
         mesh_file = "%s/%s.stl" % (state["mesh_dir_name"], mesh_name)
         write_mesh(shape, os.path.join(state["mesh_dir"], "%s.stl" % mesh_name), state["options"])
         state["meshes"][key] = mesh_file
@@ -512,13 +504,18 @@ def add_sun(world):
     sub(light, "direction", "-0.5 0.1 -0.9")
 
 
-def add_ground_plane(world):
-    """The ground every Gazebo world is normally loaded with."""
+def add_ground_plane(world, names=None):
+    """The ground every Gazebo world is normally loaded with.
+
+    Its model and link are named out of 'names', the world's transcoder, when
+    there is one: Gazebo reports every pose by the bare name, so a body called
+    'link' must not share its name with the plane's link.
+    """
     model = ElementTree.SubElement(world, "model")
-    model.set("name", "ground_plane")
+    model.set("name", names.derive("ground_plane") if names is not None else "ground_plane")
     sub(model, "static", "true")
     link = ElementTree.SubElement(model, "link")
-    link.set("name", "link")
+    link.set("name", names.derive("link") if names is not None else "link")
     for kind in ("collision", "visual"):
         element = ElementTree.SubElement(link, kind)
         element.set("name", kind)
@@ -686,7 +683,7 @@ class Planner:
 
     def __init__(self, found, names=None, version=None, static=True, warnings=None):
         self.found = found
-        self.names = names if names is not None else NameAllocator("-", 2)
+        self.names = names if names is not None else naming.Transcoder(SDF_NAMES)
         self.version_text = str(version or gazebo_common.SDF_VERSION)
         self.version = version_of(self.version_text)
         self.static = static
@@ -698,10 +695,23 @@ class Planner:
         # PartCAD joint name -> the (JointPlan, freedom) pairs it became: what a
         # 'mimic' looks its leader up in.
         self._written = {}
+        # The name a run reports each SDFormat joint by -> where it is (its
+        # model's and its own name) and the PartCAD joint it is (a freedom of):
+        # the sidecar's 'joints'. See 'joint_name'.
+        self.reported = {}
         self._mimics = []
         self._started = []
 
+    def written(self):
+        """The bodies this writes: every one with something in it or under it."""
+        return [body for body in self.found if body.parts or body.children]
+
+    def claim_bodies(self):
+        """Claim every body's name before anything is derived, so that a derived name is the one told apart."""
+        self.names.claim_all((body.name for body in self.written()), "body")
+
     def plan(self):
+        self.claim_bodies()
         for body in self.found:
             if not body.parts and not body.children:
                 # A frame with nothing in it and nothing under it, which is
@@ -723,8 +733,8 @@ class Planner:
         return self
 
     def root(self, body):
-        model = ModelPlan(self.names.take(body.name, "model"), body.world, body)
-        link = LinkPlan(self.names.take("%s_link" % body.name, "link"), IDENTITY, body)
+        model = ModelPlan(self.names.claim(body.name, "body", "model"), body.world, body)
+        link = LinkPlan(self.names.derive("%s_link" % model.name, "link"), IDENTITY, body)
         model.links.append(link)
         self.models.append(model)
         self._placed[id(body)] = (model, link)
@@ -742,7 +752,7 @@ class Planner:
         # A '<static>' model moves nothing, its joints included: a mechanism
         # bolted down is its root welded to the world, and the rest free.
         root = model.links[0]
-        name = self.names.take("%s-world" % model.body.name, "joint")
+        name = self.names.derive("%s-world" % model.name, "joint")
         model.joints.insert(0, JointPlan(name, "fixed", None, root, root.frame))
 
     def jointed(self, body):
@@ -754,7 +764,9 @@ class Planner:
         classification = joint.classification
         zero = zero_values(joint)
         base = parent.frame
-        child = LinkPlan(self.names.take(body.name, "link"), kinematics.compose(base, joint.location(zero)), body)
+        child = LinkPlan(
+            self.names.claim(body.name, "body", "link"), kinematics.compose(base, joint.location(zero)), body
+        )
         self._placed[id(body)] = (model, child)
 
         for freedom in joint.freedoms:
@@ -780,7 +792,7 @@ class Planner:
             return
         if kind == kinematics.UNIVERSAL:
             model.links.append(child)
-            plan = JointPlan(self.names.take(name, "joint"), "universal", parent, child, native, joint)
+            plan = JointPlan(self.joint_name(model, name, joint), "universal", parent, child, native, joint)
             plan.axes = [AxisPlan(classification.axes[i], joint.freedoms[i]) for i in range(2)]
             model.joints.append(plan)
             self._written[joint.name] = [(plan, freedom) for freedom in joint.freedoms]
@@ -788,7 +800,7 @@ class Planner:
             return
         if kind == kinematics.BALL:
             model.links.append(child)
-            plan = JointPlan(self.names.take(name, "joint"), "ball", parent, child, native, joint)
+            plan = JointPlan(self.joint_name(model, name, joint), "ball", parent, child, native, joint)
             model.joints.append(plan)
             self._written[joint.name] = [(plan, None)]
             self._ball(name, joint, joint.freedoms)
@@ -804,7 +816,7 @@ class Planner:
         if zero is not None:
             frame = kinematics.compose(frame, joint.frame(freedom.index, zero))
         joint_type = "revolute" if freedom.kind == TURN else "prismatic"
-        plan = JointPlan(self.names.take(name, "joint"), joint_type, parent, child, frame, joint)
+        plan = JointPlan(self.joint_name(model, name, joint), joint_type, parent, child, frame, joint)
         plan.axes.append(AxisPlan(vector, freedom, physics=freedom.follows is None))
         model.joints.append(plan)
         return plan
@@ -823,7 +835,7 @@ class Planner:
             per_degree = 1.0 / turn.ratio if turn.ratio else 0.0
         # Millimetres a degree, along the turn's own axis, to metres a turn.
         pitch = sense * per_degree * 360.0 / urdf_common.MM_PER_M
-        plan = JointPlan(self.names.take(name, "joint"), "screw", parent, child, frame, joint)
+        plan = JointPlan(self.joint_name(model, name, joint), "screw", parent, child, frame, joint)
         plan.axes.append(AxisPlan(axis, turn, physics=turn.follows is None))
         model.joints.append(plan)
         self._written[joint.name] = [(plan, turn)]
@@ -852,7 +864,7 @@ class Planner:
             freedom = joint.freedoms[index]
             # Every move leaves the frame the ball turns in where it was, so
             # every dummy link sits there, at zero.
-            dummy = LinkPlan(self.names.take("%s_link%d" % (name, index + 1), "link"), frame)
+            dummy = LinkPlan(self.names.derive("%s_link%d" % (name, index + 1), "link"), frame)
             model.links.append(dummy)
             dummies.append(dummy.name)
             label = name + FREEDOM_SEPARATOR + freedom_label(freedom)
@@ -860,7 +872,9 @@ class Planner:
             written.append((plan, freedom))
             previous = dummy
         model.links.append(child)
-        ball = JointPlan(self.names.take(name + FREEDOM_SEPARATOR + "ball", "joint"), "ball", previous, child, frame)
+        ball = JointPlan(
+            self.joint_name(model, name + FREEDOM_SEPARATOR + "ball", joint), "ball", previous, child, frame
+        )
         model.joints.append(ball)
         self._written[joint.name] = written + [(ball, None)]
         self._ball(name, joint, joint.freedoms[3:])
@@ -879,7 +893,7 @@ class Planner:
                 # Where the freedom leaves the frame at zero: the next one's
                 # parent, which it turns or slides with.
                 link = LinkPlan(
-                    self.names.take("%s_link%d" % (name, index + 1), "link"),
+                    self.names.derive("%s_link%d" % (name, index + 1), "link"),
                     kinematics.compose(base, joint.frame(index, zero)),
                 )
                 dummies.append(link.name)
@@ -908,6 +922,21 @@ class Planner:
                 )
         self._report_chain(name, joint, [plan.name for plan, _ in written], dummies)
         self._not_one_axis(joint, "chain")
+
+    def joint_name(self, model, name, joint):
+        """The SDFormat name of the joint a run reports as 'name' (PartCAD's), recorded for the sidecar."""
+        internal = self.names.claim(name, "joint", "joint")
+        self.reported[name] = {"path": [model.name, internal], "joint": joint.name}
+        return internal
+
+    def bodies(self):
+        """The sidecar's 'bodies': where each PartCAD body is, its model and its link."""
+        out = {}
+        for model in self.models:
+            for link in model.links:
+                if link.body is not None:
+                    out[link.body.name] = {"path": [model.name, link.name]}
+        return out
 
     def _report_chain(self, name, joint, written, dummies):
         self.warnings.append(
@@ -1153,11 +1182,12 @@ def process(path, request):
 
     world_dir = os.path.dirname(os.path.abspath(path)) or "."
     stem = os.path.splitext(os.path.basename(path))[0] or "world"
-    world_name = sanitize_name(request.get("world_name") or root.get("label") or stem, stem)
-    if world_name == RESERVED_NAME:
-        # Gazebo refuses to load a world of that name, and a scene called
-        # "world" is the most natural thing there is to call one.
-        world_name = "partcad_" + world_name
+    # The scene's own name, 'world' included: PartCAD's default world is called
+    # that, and SDFormat reserves it, so the world is written under another
+    # name and keeps PartCAD's everywhere a run reports it.
+    scene_name = str(request.get("world_name") or root.get("label") or stem)
+    scene_names = naming.Transcoder(SDF_NAMES)
+    world_name = scene_names.claim(scene_name, "scene", stem)
     mesh_dir_name = request.get("mesh_dir") or "%s_meshes" % stem
     mesh_dir = os.path.join(world_dir, mesh_dir_name)
     os.makedirs(mesh_dir, exist_ok=True)
@@ -1169,8 +1199,10 @@ def process(path, request):
     state = {
         # Models, links and joints: one namespace, so that no two of them
         # answer to one name in what Gazebo reports.
-        "names": NameAllocator("-", 2, reserved=(RESERVED_NAME,)),
-        "mesh_names": NameAllocator(),
+        "names": naming.Transcoder(SDF_NAMES),
+        # A mesh's name is also its file's, so it answers to the filesystem's
+        # rules rather than SDFormat's; 'cube_1.stl' after 'cube.stl'.
+        "mesh_names": naming.Transcoder(naming.FILE_NAMES, "_", 1),
         "meshes": {},
         "mesh_dir": mesh_dir,
         "mesh_dir_name": mesh_dir_name,
@@ -1216,27 +1248,40 @@ def process(path, request):
     # usable. A world with no light renders black and a world with no ground
     # has nothing to stand on, so a simulator's own empty world ships with
     # both. Turn either off with 'sun: false' / 'ground_plane: false'.
+    #
+    # The bodies, parents first, as PartCAD's body rule finds them in the tree;
+    # what the rule set aside (a 'fixed' inside an assembly, a joint inside a
+    # scene) is said rather than written. Their names are claimed before the
+    # ground plane's, which is the one told apart from a body called that.
+    found = kinematics.bodies(root, request.get("properties"))
+    warnings.extend(found.problems)
+    planner = Planner(found, state["names"], version, state["options"]["static"], warnings)
+    planner.claim_bodies()
     if request.get("sun", True):
         add_sun(world)
     if request.get("ground_plane", True):
-        add_ground_plane(world)
-        state["names"].take("ground_plane")
-
-    # The bodies, parents first, as PartCAD's body rule finds them in the tree;
-    # what the rule set aside (a 'fixed' inside an assembly, a joint inside a
-    # scene) is said rather than written.
-    found = kinematics.bodies(root, request.get("properties"))
-    warnings.extend(found.problems)
-    planner = Planner(found, state["names"], version, state["options"]["static"], warnings).plan()
+        add_ground_plane(world, state["names"])
+    planner.plan()
     state["unsupported"].update(planner.unsupported)
     for model in planner.models:
         write_model(world, model, state)
+    renamed = naming.renamed_warning(SDF_NAMES, scene_names, state["names"])
+    if renamed:
+        warnings.append(renamed)
 
     ElementTree.indent(sdf, space="  ")
     with open(path, "w", encoding="utf-8") as f:
         f.write('<?xml version="1.0" ?>\n')
         f.write(ElementTree.tostring(sdf, encoding="unicode"))
         f.write("\n")
+    if request.get("names_file"):
+        naming.write_sidecar(
+            path,
+            "world",
+            naming.merged_mapping(scene_names, state["names"]),
+            planner.bodies(),
+            dict(planner.reported),
+        )
 
     return {
         "success": True,
