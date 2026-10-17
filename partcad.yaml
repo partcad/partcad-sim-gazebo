@@ -376,7 +376,9 @@ simulation:
     # How long, in seconds of simulated time. Ten is long enough for something
     # that is going to fall over to have fallen over and come to rest.
     duration: 10.0
-    # Gazebo's own step size unless this says otherwise, in seconds.
+    # The integration step, in seconds, written into the world as its
+    # '<physics><max_step_size>': Gazebo's own, 0.001, unless this says
+    # otherwise. The run goes at real time whatever the step.
     # timestep: 0.001
     #
     # The gravity to run under, in m/s^2, written into the world before Gazebo
@@ -404,7 +406,10 @@ simulation:
     startup_timeout: 120.0
     # Report where every model is at each of these many evenly spaced instants,
     # as 'samples'. Zero -- the default -- reports only 'before' and 'after',
-    # which is what a validation reads.
+    # which is what a validation reads. Gazebo publishes poses sixty times a
+    # second of the wall clock, so a run that asks for more readings a
+    # simulated second runs slower than real time to give them; one that gets
+    # fewer than it asked for says so in 'warnings'.
     samples: 0
     # The two pictures PartCAD asks every run for, of the world before and
     # after, are not configured here: PartCAD says where they go and where they

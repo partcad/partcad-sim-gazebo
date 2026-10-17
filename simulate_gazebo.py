@@ -41,12 +41,20 @@ sandbox does not have -- out of the world file Gazebo ran, each visual placed
 where the pose messages say its model and its link were at the first reading
 and at the last; see 'world_layout' and 'arrange'.
 
-**Why the clock is read out of the messages.** ``gz sim -r`` runs at a real-time
+**Why the clock is read out of the messages.** Gazebo runs at a real-time
 factor of about one, so waiting ten wall-clock seconds is *nearly* ten seconds of
 simulation -- and "nearly" is not something a validation should depend on. Every
 pose message carries the simulated time it was taken at, so this waits for that
 to pass ``duration`` instead, and uses wall-clock only as the timeout that stops
 a run which is not progressing at all.
+
+**The first reading is the world as it was loaded.** The server is started
+paused, ``before`` is read at t = 0 -- every joint at its start, every body where
+the scene put it, every speed nought -- and only then is the world set running,
+by its own control service ('unpause'). The step is the world's
+``<max_step_size>`` and ``timestep`` writes it ('world_physics'); a run that asks
+for more ``samples`` than the sixty pose messages a wall-clock second Gazebo
+publishes runs slower than real time to get them ('pace').
 
 **Joints.** A world whose models have joints in them -- a hinge, a slide -- is
 also read for where each joint is and how fast it moves, as ``joints`` beside
@@ -677,6 +685,83 @@ def world_gravity(path, gravity=None):
     if not text or not text.strip():
         return list(SDF_DEFAULT_GRAVITY)
     return gazebo_common.gravity_vector(text.split(), "the '<gravity>' of %s" % path)
+
+
+# Gazebo's own step, in seconds: what a world that states no '<max_step_size>'
+# is stepped by.
+SDF_DEFAULT_STEP = 0.001
+
+# How many pose messages a second the scene broadcaster publishes -- a second of
+# the wall clock's, not the simulation's. Harmonic's SceneBroadcaster throttles
+# '/world/<name>/pose/info' to sixty a second whatever its 'dynamic_pose_hertz'
+# says (which only paces 'dynamic_pose/info', a topic that leaves out every
+# static entity), so a run that wants a reading more often than that, in
+# simulated time, has to run slower than real time to get it ('pace').
+POSE_MESSAGES_PER_SECOND = 60.0
+# How far below the slowest pace that would do a run is set, so that a pose
+# message that comes a little late still comes before the next sample is due.
+PACE_MARGIN = 0.8
+
+
+def world_physics(path, timestep=None, real_time_factor=None):
+    """Write the step and the pace a run asks for into the world in 'path', and return the step it will run at.
+
+    'timestep' is the integration step, in seconds: SDFormat's
+    '<physics><max_step_size>', which is the step Gazebo's DART takes. (It
+    used to be handed to the server as '-z 1/timestep', which is an *update
+    rate* -- iterations a second of the wall clock -- and changed only how fast
+    a run went, never the step: a 'timestep' of 0.0005 ran the world twice as
+    fast as real time on its own step of 1 ms.) 'real_time_factor' is
+    '<real_time_factor>', how much simulated time passes a second of the wall
+    clock's -- 1, Gazebo's own, unless the run asks for readings more often
+    than a pose message comes (see 'pace').
+
+    Written into the first '<physics>' the world has, or a new one, as
+    'world_gravity' writes the gravity: into the file the server is about to
+    load, which the run directory keeps.
+    """
+    from xml.etree import ElementTree
+
+    tree = ElementTree.parse(path)
+    root = tree.getroot()
+    element = root if root.tag == "world" else root.find("world")
+    if element is None:
+        raise Exception("The world file holds no world: %s" % path)
+    block = element.find("physics")
+    if timestep is not None or real_time_factor is not None:
+        if block is None:
+            block = ElementTree.Element("physics", {"name": "partcad", "type": "dart"})
+            element.insert(0, block)
+        for tag, value in (("max_step_size", timestep), ("real_time_factor", real_time_factor)):
+            if value is not None:
+                node = block.find(tag)
+                if node is None:
+                    node = ElementTree.SubElement(block, tag)
+                node.text = repr(float(value))
+        tree.write(path, encoding="utf-8", xml_declaration=True)
+    text = block.findtext("max_step_size") if block is not None else None
+    try:
+        step = float(text) if text is not None and text.strip() else SDF_DEFAULT_STEP
+    except ValueError:
+        step = SDF_DEFAULT_STEP
+    return step if step > 0 else SDF_DEFAULT_STEP
+
+
+def pace(samples, duration, step):
+    """The real-time factor that has Gazebo publish a pose message for every sample asked for, or None for its own.
+
+    A reading is a pose message, and those come sixty times a second of the
+    wall clock's ('POSE_MESSAGES_PER_SECOND'): a run in real time has sixty
+    readings to give a simulated second, and one that asks for more is run
+    slower than real time, just slow enough to give them -- as many pose
+    messages a simulated second as there are samples to take, and a margin
+    more. Never more than one a step, which is the most Gazebo has to give.
+    """
+    if samples <= 0:
+        return None
+    every = max(duration / (samples + 1), step)
+    factor = PACE_MARGIN * every * POSE_MESSAGES_PER_SECOND
+    return factor if factor < 1.0 else None
 
 
 #
@@ -1682,6 +1767,12 @@ def _metres(body):
     return tuple(body["quat"]), tuple(v / MM_PER_M for v in body["pos"])
 
 
+# What every body's velocity is at t = 0: a world starts at rest, since SDFormat
+# states no starting speed, and neither Gazebo nor PartCAD's exporter gives one.
+# Which is what a reading at the start needs no step before it to tell.
+AT_REST = (((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)), ((0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+
+
 def posed_states(reading, names, links, warnings, patience=PATIENCE):
     """Every ball and every floating child at a reading's instant, read from where their bodies are.
 
@@ -1710,7 +1801,11 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
                     % (name, joint_map.get("parent") if parent is None else entry.get("body")),
                 )
                 continue
-            twists = free_body_twists(entry, names.bodies, links, reading["time"], patience)
+            twists = (
+                AT_REST
+                if reading["time"] <= 0.0
+                else free_body_twists(entry, names.bodies, links, reading["time"], patience)
+            )
             if twists is None:
                 note(
                     warnings,
@@ -1729,8 +1824,11 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
         rotation = ball_rotation(ball, _pose_of(parent), _pose_of(child))
         path = entry.get("path") or []
         stream = links.get("::".join(str(part) for part in path[:-1]))
-        pair = stream.last_step(reading["time"], patience) if stream is not None else None
-        rate = ball_rate(ball, names.bodies, pair) if pair is not None else None
+        if reading["time"] <= 0.0:
+            rate = [0.0, 0.0, 0.0]
+        else:
+            pair = stream.last_step(reading["time"], patience) if stream is not None else None
+            rate = ball_rate(ball, names.bodies, pair) if pair is not None else None
         if rate is None:
             note(
                 warnings,
@@ -1795,14 +1893,25 @@ def process(path, request):
     names = Names.beside(scene_file)
     shown = names.world(world)
     warnings = []
-    # Before the server is started, because it is written into the file the
-    # server loads: see 'world_gravity'.
+    # Before the server is started, because they are written into the file
+    # the server loads: see 'world_gravity' and 'world_physics'.
     gravity = world_gravity(scene_file, request.get("gravity"))
-
-    command = [server] + list(server_args) + ["-s", "-r", "-v", "1"]
     timestep = request.get("timestep")
-    if timestep:
-        command += ["-z", str(1.0 / float(timestep))]
+    if timestep is not None and positive(timestep) is None:
+        raise ValueError("'timestep' is Gazebo's integration step, in seconds and more than nought; got %r" % timestep)
+    step = world_physics(scene_file, None if timestep is None else float(timestep))
+    factor = pace(samples, duration, step)
+    if factor is not None:
+        world_physics(scene_file, real_time_factor=factor)
+    if samples and duration / (samples + 1) < step:
+        note(
+            warnings,
+            "%d samples were asked for over %g s, and Gazebo steps every %g s: it has at most %d to give"
+            % (samples, duration, step, int(duration / step)),
+        )
+
+    # Paused: 'unpause' sets it running once 'before' is read, at t = 0.
+    command = [server] + list(server_args) + ["-s", "-v", "1"]
 
     programs = Programs()
     simulator = None
@@ -1942,13 +2051,25 @@ def process(path, request):
                     continue
                 before = reading
                 first = message
+                running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
+                if not running:
+                    raise Exception(
+                        "Gazebo's server would not set world '%s' running: it was started paused, so that the first"
+                        " reading is the world as loaded, and its control service ('%s service -s /world/%s/control')"
+                        " answered: %s" % (shown, server, world, answer or "nothing")
+                    )
             after = reading
             last = message
             for stream in streams:
                 stream.forget_before(reading["time"])
-            if next_sample is not None and reading["time"] >= next_sample:
+            if next_sample is not None and reading["time"] >= next_sample and len(trace) < samples:
                 fill(reading, streams, warnings, patience(), names)
                 trace.append(reading)
+                # Each sample is the first pose message at or past its instant
+                # that no sample before it took, at its own time: a step late,
+                # where a message was not published at that very step (the
+                # first one after the world is set running often is not), and
+                # never one message standing for two.
                 next_sample += every
             if reading["time"] >= duration:
                 break
@@ -1959,6 +2080,12 @@ def process(path, request):
         # the joint states of that instant may still be on their way. Unless it
         # is not, in which case what has arrived is all there will be.
         fill(after, streams, warnings, patience(), names)
+        if samples and len(trace) < samples:
+            note(
+                warnings,
+                "%d samples were asked for and %d came back: Gazebo published a pose message for no more of "
+                "the instants they were due at" % (samples, len(trace)),
+            )
     finally:
         programs.stop()
         if run_file != scene_file:
@@ -1992,6 +2119,40 @@ def process(path, request):
     if warnings:
         result["warnings"] = warnings
     return result
+
+
+def unpause(server, world, environment, timeout):
+    """Set the world in the server running, which it was started without; '(it did, what it said)'.
+
+    The server is started paused ('-s' without '-r'), so that the first
+    reading is the world as it was loaded -- at t = 0, every joint at its
+    start, every body where the scene put it -- and only once that is read is
+    it set running, by the world's own control service. The generation that
+    calls itself 'ign' names its messages 'ignition.msgs'.
+    """
+    prefix = "ignition.msgs" if os.path.basename(server).startswith("ign") else "gz.msgs"
+    command = [
+        server,
+        "service",
+        "-s",
+        "/world/%s/control" % world,
+        "--reqtype",
+        "%s.WorldControl" % prefix,
+        "--reptype",
+        "%s.Boolean" % prefix,
+        "--timeout",
+        "%d" % int(max(1.0, timeout) * 1000),
+        "--req",
+        "pause: false",
+    ]
+    try:
+        answer = subprocess.run(
+            command, capture_output=True, text=True, timeout=max(1.0, timeout) + 5.0, env=environment
+        )
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, "%s: %s" % (type(e).__name__, e)
+    said = ((answer.stdout or "") + (answer.stderr or "")).strip()
+    return answer.returncode == 0 and "data: false" not in said, said
 
 
 def _version(command, environment=None, timeout=30.0):

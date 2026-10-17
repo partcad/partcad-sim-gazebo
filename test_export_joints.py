@@ -888,6 +888,8 @@ def test_in_gazebo_a_joint_started_away_from_its_zero_reads_its_start(
     result = _run(export_world, tmp_path, tree, duration=0.1, gravity=[0.0, 0.0, 0.0])
 
     starts = [freedom.value for freedom in joint.freedoms]
+    # The world is read before it runs: the first reading is at t = 0.
+    assert result["before"]["time"] == 0.0
     for reading in (result["before"], result["after"]):
         state = reading["joints"]["arm-base"]
         assert state["type"] == kind
@@ -938,14 +940,25 @@ def test_in_gazebo_every_reading_puts_the_body_where_gazebo_has_it(
 
 def _check_ball_speed(readings):
     """A ball's 'vel' is the turn its rotation makes, over time: held to the readings either side of each."""
-    for before, reading, after in zip(readings, readings[1:], readings[2:]):
-        first, second = (tuple(r["joints"]["arm-base"]["quat"]) for r in (before, after))
+
+    def turned(earlier, later):
+        """The turn from one reading's rotation to the next's, degrees about the axes of the first."""
+        first, second = (tuple(r["joints"]["arm-base"]["quat"]) for r in (earlier, later))
         turn = urdf_common.quat_mul((first[0], -first[1], -first[2], -first[3]), second)
         if turn[0] < 0:
             turn = tuple(-v for v in turn)
         along = math.sqrt(sum(v * v for v in turn[1:]))
+        if along < 1e-15:
+            return [0.0, 0.0, 0.0]
         angle = math.degrees(2.0 * math.atan2(along, turn[0]))
-        rate = [v / along * angle / (after["time"] - before["time"]) for v in turn[1:]]
+        return [v / along * angle for v in turn[1:]]
+
+    for before, reading, after in zip(readings, readings[1:], readings[2:]):
+        # The three-point difference for readings unevenly spaced: second order
+        # in the spacing, as the even one is.
+        h1, h2 = reading["time"] - before["time"], after["time"] - reading["time"]
+        back, ahead = turned(before, reading), turned(reading, after)
+        rate = [(h1 * h1 * a + h2 * h2 * b) / (h1 * h2 * (h1 + h2)) for b, a in zip(back, ahead)]
         reported = reading["joints"]["arm-base"]["vel"]
         size = math.sqrt(sum(v * v for v in rate))
         # The difference over two pose messages, a thirtieth of a second, is
@@ -960,13 +973,13 @@ def swung(gazebo, tmp_path_factory):
     The hinge is the bore's Z axis, which the scene turns to lie along world Y,
     so that the bar, along the arm's X, starts horizontal at nought.
     """
-    return _pendulum(tmp_path_factory, "pendulum", "", duration=1.5, samples=3000)
+    return _pendulum(tmp_path_factory, "pendulum", "", duration=1.5, samples=299)
 
 
 @pytest.fixture(scope="module")
 def wound(gazebo, tmp_path_factory):
     """The same bar started half a turn round: horizontal the other way, on a hinge bounded on neither side."""
-    return _pendulum(tmp_path_factory, "wound", ", toParams: {turnZ: 180}", duration=0.5, samples=1000)
+    return _pendulum(tmp_path_factory, "wound", ", toParams: {turnZ: 180}", duration=0.5, samples=99)
 
 
 def _pendulum(tmp_path_factory, name, params, **request):
@@ -1005,12 +1018,22 @@ def test_in_gazebo_a_pendulum_released_horizontal_passes_the_bottom_at_the_speed
     expected = math.degrees(math.sqrt(2.0 * BAR_MASS * G * BAR_D / BAR_I_PIVOT))
     readings = [sample["joints"]["arm-base"] for sample in swung["samples"]]
 
-    # Released at nought: the first reading is a few steps in, where it has
-    # fallen as anything starting from rest does, by half its acceleration
-    # times the time squared.
+    # Released at nought, and read there: the world is started paused and
+    # read before it runs, so the first reading is at t = 0, at rest.
     before = swung["before"]
-    accelerating = math.degrees(BAR_MASS * G * BAR_D / BAR_I_PIVOT)
-    assert abs(before["joints"]["arm-base"]["pos"]) == pytest.approx(0.5 * accelerating * before["time"] ** 2, abs=0.1)
+    assert before["time"] == 0.0
+    assert before["joints"]["arm-base"]["pos"] == pytest.approx(0.0, abs=1e-9)
+    assert before["joints"]["arm-base"]["vel"] == pytest.approx(0.0, abs=1e-9)
+    # Every sample asked for came back, each the first pose message at or past
+    # its instant that no sample before it took -- the run paced to give one
+    # for each -- and none of them later than the instant after its own: the
+    # pose messages come by the wall clock, a step or so either way.
+    assert len(swung["samples"]) == 299
+    every = 1.5 / 300
+    times = [sample["time"] for sample in swung["samples"]]
+    assert times == sorted(set(times))
+    for index, time_ in enumerate(times):
+        assert (index + 1) * every - 1e-9 <= time_ <= (index + 2) * every + STEP + 1e-9, index
     # A hinge bounded on neither side is a revolute, as PartCAD calls it.
     assert swung["before"]["joints"]["arm-base"]["type"] == "revolute"
     fastest = max(readings, key=lambda reading: abs(reading["vel"]))
@@ -1061,8 +1084,9 @@ def test_in_gazebo_a_pendulum_started_half_a_turn_round_reads_its_start_and_its_
     """
     expected = math.degrees(math.sqrt(2.0 * BAR_MASS * G * BAR_D / BAR_I_PIVOT))
     before = wound["before"]["joints"]["arm-base"]
-    accelerating = math.degrees(BAR_MASS * G * BAR_D / BAR_I_PIVOT)
-    assert abs(before["pos"] - 180.0) == pytest.approx(0.5 * accelerating * wound["before"]["time"] ** 2, abs=0.1)
+    # At t = 0, exactly where it was started.
+    assert wound["before"]["time"] == 0.0
+    assert before["pos"] == pytest.approx(180.0, abs=1e-9)
     fastest = max((sample["joints"]["arm-base"] for sample in wound["samples"]), key=lambda state: abs(state["vel"]))
     print("wound: fastest %.3f deg/s at %.2f deg, against %.3f deg/s" % (abs(fastest["vel"]), fastest["pos"], expected))
     assert abs(fastest["vel"]) == pytest.approx(expected, rel=0.01)
@@ -1146,11 +1170,9 @@ def test_in_gazebo_a_floating_child_falls_free_from_its_start(gazebo, tmp_path, 
         # step moved it by, which is the speed semi-implicit Euler ends a step
         # with -- the engine's own -- where a difference across the reading
         # would be the speed half a step on.
-        # At the first step there is no step before it to tell a speed by, and
-        # the next one's is read: a step on, at worst.
+        # At rest at t = 0, where the world is read before it runs.
         speed = math.sqrt(sum(state["vel"][name] ** 2 for name in moves))
-        expected = G * 1000.0 * (t if t > 1.5 * STEP else t + STEP)
-        assert speed == pytest.approx(expected, rel=1e-6, abs=1e-6), t
+        assert speed == pytest.approx(G * 1000.0 * t, rel=1e-6, abs=1e-6), t
         # And it falls without turning.
         assert max(abs(v) for v in state["vel"]["angular"]) < 1e-6
     print(
@@ -1189,8 +1211,8 @@ def test_in_gazebo_a_floating_child_s_rates_against_a_body_that_turns_are_the_en
       g t (semi-implicit Euler), the bar turning about its hinge, through its
       own origin, at the speed its joint state reports;
     * and, loosely, each rate is the derivative of the lid's readings
-      themselves, a pose message a sixtieth of a second apart -- the
-      five-point difference either side, half a step back. Only loosely: the
+      themselves, a few milliseconds apart -- the slope of the quartic
+      through five of them, half a step back. Only loosely: the
       engine's speeds are half a step behind its positions, and a rate
       against a turning body is a speed taken at one position, which no curve
       through the positions has as its derivative; the two differ by about
@@ -1239,18 +1261,16 @@ def test_in_gazebo_a_floating_child_s_rates_against_a_body_that_turns_are_the_en
             exact = max(exact, abs(state["vel"][name] - engine[name]))
 
     worst = {name: 0.0 for name in names}
+    import numpy
+
     for around in zip(readings, readings[1:], readings[2:], readings[3:], readings[4:]):
-        times = [reading["time"] for reading in around]
-        h = (times[4] - times[0]) / 4.0
-        if max(abs(b - a - h) for a, b in zip(times, times[1:])) > 1e-9:
-            continue
+        times = numpy.array([reading["time"] for reading in around]) - around[2]["time"]
         for name in names:
+            # The quartic through the five readings, its slope half a step back.
             f = [reading["joints"]["loose"]["pos"][name] for reading in around]
-            first = (-f[4] + 8.0 * f[3] - 8.0 * f[1] + f[0]) / (12.0 * h)
-            second = (-f[4] + 16.0 * f[3] - 30.0 * f[2] + 16.0 * f[1] - f[0]) / (12.0 * h * h)
-            difference = first - 0.5 * STEP * second
+            difference = float(numpy.polyval(numpy.polyder(numpy.polyfit(times, f, 4)), -0.5 * STEP))
             rate = around[2]["joints"]["loose"]["vel"][name]
-            assert rate == pytest.approx(difference, rel=3e-2, abs=30.0), (times[2], name, rate, difference)
+            assert rate == pytest.approx(difference, rel=3e-2, abs=30.0), (around[2]["time"], name, rate, difference)
             worst[name] = max(worst[name], abs(rate - difference))
     swung = abs(result["after"]["joints"]["swing"]["pos"])
     assert swung > 30.0
@@ -1265,3 +1285,50 @@ def test_in_gazebo_a_floating_child_s_rates_against_a_body_that_turns_are_the_en
             {name: round(value, 3) for name, value in worst.items()},
         )
     )
+
+
+def test_in_gazebo_every_sample_asked_for_comes_back_one_a_step(gazebo, tmp_path, stand_in_geometry, export_world):
+    """199 over 0.2 s is one a millisecond, Gazebo's step: far more than the sixty pose messages a second it publishes.
+
+    So the run goes as slow as it must to give them ('pace'), and they come
+    back one a step, each at its own instant.
+    """
+    tree = in_a_scene(rig(tmp_path, "motion: revolute"), [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 90.0])
+    result = _run(export_world, tmp_path, tree, duration=0.2, samples=199, gravity=[0.0, 0.0, -G])
+
+    times = [sample["time"] for sample in result["samples"]]
+    assert len(times) == 199
+    # One a step, each at its own instant or a step past it: the first step
+    # after the world is set running may go unpublished, Gazebo publishing
+    # poses by the wall clock and having just published the paused world's.
+    assert times == sorted(set(times))
+    assert all(0.001 * (index + 1) - 1e-9 <= time_ <= 0.001 * (index + 2) + 1e-9 for index, time_ in enumerate(times))
+    assert "warnings" not in result
+
+
+def test_in_gazebo_a_timestep_is_the_step_gazebo_takes(gazebo, tmp_path, stand_in_geometry, export_world):
+    """Half a millisecond: the readings fall on its multiples, and a revolute is still read where its body is."""
+    tree = in_a_scene(rig(tmp_path, "motion: revolute"), [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 90.0])
+    arm = kinematics.bodies(tree).by_name("arm")
+    result = _run(
+        export_world, tmp_path, tree, bar(), duration=0.05, samples=99, timestep=0.0005, gravity=[0.0, 0.0, -G]
+    )
+
+    times = [sample["time"] for sample in result["samples"]]
+    assert len(times) == 99
+    # On the half milliseconds, each at its own instant or a step past it.
+    assert all(abs(time_ / 0.0005 - round(time_ / 0.0005)) < 1e-6 for time_ in times)
+    assert any(abs(time_ / 0.001 - round(time_ / 0.001)) > 0.25 for time_ in times)
+    assert all(0.0005 * (index + 1) - 1e-9 <= time_ <= 0.0005 * (index + 2) + 1e-9 for index, time_ in enumerate(times))
+    # Released at nought and at rest, its turn is the bar's under gravity:
+    # half its angular acceleration times t (t + dt), semi-implicit Euler's,
+    # and dt the half millisecond asked for.
+    accelerating = math.degrees(BAR_MASS * G * BAR_D / BAR_I_PIVOT)
+    for sample in result["samples"]:
+        t = sample["time"]
+        turned = abs(sample["joints"]["arm-base"]["pos"])
+        assert turned == pytest.approx(0.5 * accelerating * t * (t + 0.0005), rel=2e-3), t
+        expected = kinematics.compose(
+            _body(sample, "subject"), arm.joint.location([sample["joints"]["arm-base"]["pos"]])
+        )
+        assert _close_pose(_body(sample, "arm"), expected, 1e-6), t

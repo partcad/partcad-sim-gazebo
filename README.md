@@ -94,9 +94,18 @@ PartCAD reads nothing inside `before` and `after`. It hands them to the
 judgement in that sentence belongs to the package being simulated.
 
 The clock is read out of the messages rather than off the wall, which matters:
-`gz sim -r` runs at a real-time factor of about one, and "about" is not something
+Gazebo runs at a real-time factor of about one, and "about" is not something
 a validation should depend on. Wall-clock time is only the `timeout` that stops a
 run which is not progressing at all (see "When a run goes wrong").
+
+**`before` is the world as it was loaded, at `time` 0.** The server is started
+paused, the first reading is taken while it is — every joint at its start,
+every body where the scene put it, every speed nought, since a world starts at
+rest — and only then is the world set running, through its own control service
+(`/world/<name>/control`). A pendulum started at 90° reads exactly 90 in
+`before`. Every reading's `time` is the simulated instant its pose message was
+taken at, read out of the message; `after` is the first one at or past
+`duration`.
 
 Every run has a Gazebo transport **partition** of its own, and the server and
 everything that reads from it are started in it. Gazebo names its topics after
@@ -407,11 +416,11 @@ of one `simulate:` entry (per simulation).
 | Parameter | Default | What it is |
 | --- | --- | --- |
 | `duration` | `10.0` | Seconds of simulated time to run for. |
-| `timestep` | Gazebo's | Integration step, in seconds. |
+| `timestep` | Gazebo's, 0.001 | Integration step, in seconds: written into the world as `<physics><max_step_size>`, the step Gazebo's DART takes. (It used to be handed to the server as `gz sim -z`, which is an update rate, iterations a second of the wall clock, and changed only how fast a run went, never its step.) The run goes at real time whatever the step. |
 | `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run, by writing it into the world before Gazebo loads it; unset, the run is under the scene's, or SDFormat's `[0, 0, -9.8]` when the scene states none. |
 | `timeout` | PartCAD's | Wall-clock seconds the whole run may take. PartCAD works it out and hands it to every run; `300.0` where it does not. See below. |
 | `startup_timeout` | `120.0` | Wall-clock seconds the server may take to publish its first pose. |
-| `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`. |
+| `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`: each the first pose message at or past its instant that no sample before it took, at its own `time` (an instant or so late at worst). Gazebo publishes poses sixty times a second *of the wall clock*, so a run asking for more readings a simulated second than that runs slower than real time to give them (`<real_time_factor>`), never more than one a step; if fewer come back than were asked for, `warnings` says how many of how many. |
 
 The reader and the writer take parameters of their own; `partcad.yaml` lists
 each one beside what it does.
