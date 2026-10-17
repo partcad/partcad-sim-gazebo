@@ -11,21 +11,32 @@ two interfaces, a 'motion:' on one of them, composed by PartCAD's own ASSY code
 and handed to the exporter the way 'pc export' and 'pc sim' hand it over. The
 same trees the MJCF exporter of partcad-sim-mujoco is tested on.
 
-Three things are checked, each against an answer that does not come from the
-exporter:
+What is checked, each against an answer that does not come from the exporter:
 
-* **every row of the classification table** (section 8.8 of PartCAD's
-  simulation design record) is written as the SDFormat joints the table says,
-  named as PartCAD names them, with no ``continuous`` anywhere;
-* **every placement**: the world file is read back with a forward kinematics of
-  its own (``sdf_poses``) -- the links' poses, each joint's frame and axis as
-  SDFormat states them -- and every part is where the tree puts it with the
-  joints at zero, and every body, moved, is where PartCAD's own 'kinematics'
-  says that configuration puts it;
-* **physics with a closed form**, in a real Gazebo: a bar on a revolute joint
-  released horizontal passes the bottom at sqrt(2 m g d / I), and swings with
-  the period 4 K(sin 45 deg) sqrt(I / (m g d)) of a pendulum released at a
-  right angle; a nut on a screw moves as its thread says.
+* **every row of the classification table** (section 8.13.4 of PartCAD's
+  simulation design record): a revolute, prismatic, screw, universal or ball
+  joint is one SDFormat joint of that type, named as PartCAD names it, with no
+  ``continuous`` anywhere and no link nobody built; a floating child is a model
+  of its own; and a cylindrical, planar or composite joint is refused, naming
+  the joint, its type, the engine and the ways on, before anything is written;
+* **every placement, re-zeroed**: the world file is read back with a forward
+  kinematics of its own (``sdf_poses``) -- the links' poses, each joint's frame
+  and axis as SDFormat states them -- and at Gazebo's zero every part is where
+  the assembly shows it, every joint at its start, and every body, moved, is
+  where PartCAD's own 'kinematics' puts the start plus the move;
+* **what a run reads back**: the joint map each joint's sidecar entry carries
+  reads the joint's start at Gazebo's zero;
+* **in a real Gazebo**: every native joint is a world SDFormat accepts; started
+  away from its zero with nothing to move it, it reads its start; under a
+  gravity along no axis, every reading put through PartCAD's own joint is
+  where Gazebo has the body; and physics with a closed form -- a bar on a
+  revolute joint released horizontal passes the bottom at sqrt(2 m g d / I) and
+  swings with the period 4 K(sin 45 deg) sqrt(I / (m g d)) of a right-angle
+  swing, started half a turn round it reads 180 and its bottom unwrapped, a
+  bound stops it where PartCAD says, a carriage falls g t^2 / 2 from its start
+  to its stop, a floating child falls free at g t, a lid falling free beside
+  the swinging bar has the rates against it that the engine's own velocities
+  give, and a nut on a screw moves as its thread says.
 
 The last are skipped without a Gazebo, which CI's runners do not have; run them
 in the image the simulation uses, with PartCAD in the environment:
@@ -38,6 +49,7 @@ in the image the simulation uses, with PartCAD in the environment:
 """
 
 import asyncio
+import json
 import math
 import os
 import shutil
@@ -55,6 +67,7 @@ sys.path.insert(0, HERE)
 sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
 
 import kinematics  # noqa: E402
+import naming  # noqa: E402
 import urdf_common  # noqa: E402
 
 CUBE_STL = os.path.join(HERE, "tests", "data", "cube.stl")
@@ -307,126 +320,212 @@ def _flat_poses(tree):
 # The classification table, row by row
 #
 
-ROWS = [
-    # (what the bore declares, the kind, the SDFormat joints written, dummy links)
-    ("motion: {type: revolute, limits: {lower: 0, upper: 90}}", kinematics.REVOLUTE, [("arm-base", "revolute")], 0),
-    ("motion: continuous", kinematics.CONTINUOUS, [("arm-base", "revolute")], 0),
-    ("motion: {type: prismatic, limits: {lower: 0, upper: 5}}", kinematics.PRISMATIC, [("arm-base", "prismatic")], 0),
+# Every joint SDFormat has a type for, started away from its zero wherever it
+# has a parameter to start: (id, what the bore declares, the start, the kind).
+# SDFormat states no starting value, so every one of them is written re-zeroed
+# at its start.
+NATIVE_ROWS = [
+    ("revolute", "parameters: {turnZ: [-90, 120]}\nmotion: revolute", ", toParams: {turnZ: 30}", kinematics.REVOLUTE),
+    ("revolute-open", "motion: revolute", ", toParams: {turnZ: -40}", kinematics.REVOLUTE),
+    ("continuous", "motion: continuous", "", kinematics.REVOLUTE),
     (
-        "motion: cylindrical",
-        kinematics.CYLINDRICAL,
-        [("arm-base.turnZ", "revolute"), ("arm-base.moveZ", "prismatic")],
-        1,
+        "revolute-one-side",
+        "parameters: {turnZ: [-90, .inf]}\nmotion: revolute",
+        ", toParams: {turnZ: -30}",
+        kinematics.REVOLUTE,
     ),
-    ("threadStep: 10\nmotion: screw", kinematics.SCREW, [("arm-base", "screw")], 0),
-    ("motion: universal", kinematics.UNIVERSAL, [("arm-base", "universal")], 0),
-    ("motion: ball", kinematics.BALL, [("arm-base", "ball")], 0),
+    ("prismatic", "parameters: {moveZ: [-5, 50]}\nmotion: prismatic", ", toParams: {moveZ: 3}", kinematics.PRISMATIC),
+    ("screw", "threadStep: 10\nmotion: screw", ", toParams: {turnZ: 90}", kinematics.SCREW),
+    ("universal", "motion: universal", ", toParams: {turnZ: 10, turnY: 20}", kinematics.UNIVERSAL),
+    ("ball", "motion: ball", ", toParams: {turnX: 10, turnY: 20, turnZ: 30}", kinematics.BALL),
+    ("floating", "motion: floating", ", toParams: {moveZ: 100}", kinematics.FLOATING),
+]
+# The native ones a joint is written for: all but the floating one, whose child
+# is a model of its own.
+JOINTED_ROWS = [row for row in NATIVE_ROWS if row[3] != kinematics.FLOATING]
+
+# Every joint SDFormat has no type for, which the export refuses.
+REFUSED_ROWS = [
+    ("cylindrical", "motion: cylindrical", "", kinematics.CYLINDRICAL),
+    ("planar", "motion: planar", "", kinematics.PLANAR),
+    # Declared the turn first, then the moves across it: 'dof' is the order.
+    ("planar-turn-first", "motion: {dof: [turnZ, moveX, moveY]}", ", toParams: {turnZ: 30}", kinematics.PLANAR),
     (
-        "motion: planar",
-        kinematics.PLANAR,
-        [("arm-base.moveY", "prismatic"), ("arm-base.moveX", "prismatic"), ("arm-base.turnZ", "revolute")],
-        2,
-    ),
-    (
-        "motion: floating",
-        kinematics.FLOATING,
-        [
-            ("arm-base.moveY", "prismatic"),
-            ("arm-base.moveX", "prismatic"),
-            ("arm-base.moveZ", "prismatic"),
-            ("arm-base.ball", "ball"),
-        ],
-        3,
-    ),
-    (
+        "composite",
         "parameters: {turnZ: [-90, 90], moveX: [-5, 5]}\nmotion: {dof: [turnZ, moveX]}",
-        kinematics.CHAIN,
-        [("arm-base.turnZ", "revolute"), ("arm-base.moveX", "prismatic")],
-        1,
+        ", toParams: {moveX: 2, turnZ: -20}",
+        kinematics.COMPOSITE,
     ),
 ]
 
-# Starting values away from zero where a kind has a parameter to give one: what
-# SDFormat cannot state, so every joint is written at zero and these reported.
-_STARTS = {
-    kinematics.REVOLUTE: ", toParams: {turnZ: 30}",
-    kinematics.PRISMATIC: ", withParams: {moveZ: 3}",
-    kinematics.CHAIN: ", toParams: {moveX: 2, turnZ: -20}",
-}
+
+def _ids(rows):
+    return [row[0] for row in rows]
 
 
-def _row_id(row):
-    return row[1]
+def _models(sdf):
+    return {
+        model.get("name"): model for model in sdf.find("world").findall("model") if model.get("name") != "ground_plane"
+    }
 
 
-@pytest.mark.parametrize("bore, kind, written, dummies", ROWS, ids=[_row_id(row) for row in ROWS])
-def test_every_kind_of_joint_is_written_as_the_table_says(
-    tmp_path, stand_in_geometry, export_world, bore, kind, written, dummies
+@pytest.mark.parametrize("label, bore, params, kind", NATIVE_ROWS, ids=_ids(NATIVE_ROWS))
+def test_every_native_joint_is_one_sdformat_joint_of_its_own_type(
+    tmp_path, stand_in_geometry, export_world, label, bore, params, kind
 ):
-    tree = rig(tmp_path, bore)
+    tree = rig(tmp_path, bore, params=params)
     arm = kinematics.bodies(tree).by_name("arm")
     assert arm.joint.kind == kind
 
     result, _path, sdf = export(export_world, tmp_path, tree)
 
     assert result["success"]
-    (model,) = [model for model in sdf.find("world").findall("model") if model.get("name") != "ground_plane"]
-    # The root of an assembly exported on its own is welded to the world (the
-    # file is for looking at) -- by a joint, so that its joints still move.
-    assert model.get("name") == "rig" and model.find("static") is None
-    assert sorted(sdf_joints(sdf)) == sorted([("rig-world", "fixed")] + written)
-    if dummies:
-        # A chain is its freedoms in the order the joint applies them.
-        expected = ["arm-base." + export_world.freedom_label(freedom) for freedom in arm.joint.freedoms]
-        if kind == kinematics.FLOATING:
-            expected = expected[:3] + ["arm-base.ball"]
-        assert [name for name, _type in sdf_joints(sdf)[1:]] == expected
+    assert sdf.get("version") == "1.11"
+    models = _models(sdf)
+    if kind == kinematics.FLOATING:
+        # Held by nothing: a model of its own, and no joint anywhere. Nothing
+        # moves in either, so a file for looking at has both '<static>'.
+        assert sorted(models) == ["arm", "rig"]
+        assert sdf_joints(sdf) == []
+        assert all(model.findtext("static") == "true" for model in models.values())
+    else:
+        # The root of an assembly exported on its own is welded to the world
+        # (the file is for looking at) -- by a joint, so that its joints still
+        # move.
+        assert sorted(models) == ["rig"] and models["rig"].find("static") is None
+        assert sdf_joints(sdf) == [("rig-world", "fixed"), ("arm-base", export_world.NATIVE[kind])]
+        assert [link.get("name") for link in models["rig"].findall("link")] == ["rig_link", "arm"]
+    # No link nobody built: every link is a body, with its part in it.
+    for model in models.values():
+        for link in model.findall("link"):
+            assert link.find("visual") is not None and link.find("collision") is not None, link.get("name")
     assert all(joint.get("type") != "continuous" for joint in sdf.iter("joint"))
-    links = [link.get("name") for link in model.findall("link")]
-    assert links[0] == "rig_link" and links[-1] == "arm"
-    assert len(links) == 2 + dummies
-    for link in model.findall("link")[1:-1]:
-        # A dummy link: a small mass and inertia, and nothing to see.
-        assert float(link.findtext("inertial/mass")) == pytest.approx(export_world.DUMMY_MASS)
-        assert link.find("visual") is None and link.find("collision") is None
-    if dummies:
-        assert any("has no SDFormat type" in warning for warning in result["warnings"])
     # Every axis is expressed in its joint's parent link.
-    for joint in model.findall("joint"):
+    for joint in sdf.iter("joint"):
         for xyz in joint.findall("axis/xyz") + joint.findall("axis2/xyz"):
             assert xyz.get("expressed_in") == joint.findtext("parent")
+    # A start is where the joint is written, so there is nothing to say about one.
+    assert not any("start" in warning for warning in result["warnings"])
 
 
-def test_an_unlimited_turn_is_a_revolute_with_no_limit_and_a_limited_one_has_radians(
+@pytest.mark.parametrize("label, bore, params, kind", REFUSED_ROWS, ids=_ids(REFUSED_ROWS))
+def test_a_joint_gazebo_has_no_joint_for_is_refused_and_nothing_is_written(
+    tmp_path, stand_in_geometry, export_world, label, bore, params, kind
+):
+    tree = rig(tmp_path, bore, params=params)
+    joint = kinematics.bodies(tree).by_name("arm").joint
+    assert joint.kind == kind
+    if label == "planar-turn-first":
+        assert [freedom.kind for freedom in joint.freedoms] == [kinematics.TURN, kinematics.MOVE, kinematics.MOVE]
+    out = tmp_path / "out"
+    out.mkdir()
+
+    with pytest.raises(export_world.Refused) as refused:
+        export_world.process(
+            str(out / "scene.world"), {"wrapped": tree, "properties": weighed(tree), "names_file": True}
+        )
+
+    assert refused.value.joints == [("arm-base", kind)]
+    message = str(refused.value)
+    # The joint, its type, the engine, and the two ways on: another engine, or
+    # the body the joint stands for, modelled and joined by native joints.
+    assert "Gazebo cannot simulate the %s joint 'arm-base'" % kind in message
+    assert "MuJoCo" in message and "model the body the joint stands for" in message
+    assert "native joints" in message
+    # Before anything is written: no world, no sidecar, no meshes' directory.
+    assert list(out.iterdir()) == []
+
+
+TWO_REFUSED = """
+links:
+  - part: base
+  - part: arm
+    connect: {name: base, with: pin, to: bore, joint: sleeve}
+  - part: lid
+    connect: {name: arm, with: pin, to: bore, joint: slider, motion: planar}
+"""
+
+
+def test_every_joint_refused_is_named_at_once(tmp_path, stand_in_geometry, export_world):
+    """Including one hanging off another that is refused: a fix at a time is a run at a time."""
+    tree = rig(tmp_path, "motion: cylindrical", assy=TWO_REFUSED)
+
+    with pytest.raises(export_world.Refused) as refused:
+        export(export_world, tmp_path, tree)
+
+    assert refused.value.joints == [("sleeve", kinematics.CYLINDRICAL), ("slider", kinematics.PLANAR)]
+    assert "'sleeve'" in str(refused.value) and "'slider'" in str(refused.value)
+
+
+def _limit(sdf):
+    limit = sdf.find(".//joint[@name='arm-base']/axis/limit")
+    return None if limit is None else {child.tag: float(child.text) for child in limit}
+
+
+def test_a_bound_on_neither_side_or_on_one_is_left_out_rather_than_written_as_a_number(
     tmp_path, stand_in_geometry, export_world
 ):
-    _result, _path, free = export(export_world, tmp_path, rig(tmp_path / "a", "motion: revolute"), "a.world")
-    _result, _path, bounded = export(
-        export_world,
-        tmp_path,
-        rig(tmp_path / "b", "motion: {type: revolute, limits: {lower: -30, upper: 90}}"),
-        "b.world",
-    )
+    """From SDFormat 1.10 an omitted '<lower>' is -inf and an omitted '<upper>' +inf, which DART takes as no stop."""
 
-    assert free.find(".//joint[@name='arm-base']").get("type") == "revolute"
-    assert free.find(".//joint[@name='arm-base']/axis/limit") is None
-    limit = bounded.find(".//joint[@name='arm-base']/axis/limit")
-    freedom = (
-        kinematics.bodies(rig(tmp_path / "c", "motion: {type: revolute, limits: {lower: -30, upper: 90}}"))
-        .by_name("arm")
-        .joint.freedoms[0]
-    )
-    assert sorted([float(limit.findtext("lower")), float(limit.findtext("upper"))]) == pytest.approx(
-        sorted([math.radians(freedom.lower), math.radians(freedom.upper)])
-    )
+    def exported(name, bore):
+        tree = rig(tmp_path / name, bore)
+        _result, path, sdf = export(export_world, tmp_path, tree, name + ".world")
+        return kinematics.bodies(tree).by_name("arm").joint.freedoms[0], sdf, path.read_text(encoding="utf-8")
+
+    _freedom, open_turn, text_open = exported("open", "motion: revolute")
+    one, one_side, text_one = exported("one", "parameters: {turnZ: [-30, .inf]}\nmotion: revolute")
+    both, two_sides, _text = exported("both", "parameters: {turnZ: [-30, 90]}\nmotion: revolute")
+    _freedom, pushed, _text = exported("pushed", "motion: revolute\nphysics: {maxEffort: 3}")
+
+    assert open_turn.find(".//joint[@name='arm-base']").get("type") == "revolute"
+    assert _limit(open_turn) is None
+    side, bound = ("lower", one.lower) if one.lower is not None else ("upper", one.upper)
+    assert _limit(one_side) == {side: pytest.approx(math.radians(bound))}
+    assert _limit(two_sides) == {
+        "lower": pytest.approx(math.radians(both.lower)),
+        "upper": pytest.approx(math.radians(both.upper)),
+    }
+    # A '<limit>' for its effort alone says nothing about where the joint stops.
+    assert _limit(pushed) == {"effort": 3.0}
+    for text in (text_open, text_one):
+        assert "1e+16" not in text and "1e16" not in text
 
 
-def test_a_joint_s_physics_are_its_dynamics_and_limits_in_si(tmp_path, stand_in_geometry, export_world):
+def test_a_joint_is_written_at_its_start_and_its_bounds_about_it(tmp_path, stand_in_geometry, export_world):
+    tree = rig(tmp_path, "parameters: {turnZ: [-90, 120]}\nmotion: revolute", params=", toParams: {turnZ: 30}")
+    result, _path, sdf = export(export_world, tmp_path, tree)
+
+    arm = kinematics.bodies(tree).by_name("arm")
+    freedom = arm.joint.freedoms[0]
+    assert (freedom.value, freedom.lower, freedom.upper) == (30.0, -90.0, 120.0)
+    # At Gazebo's zero the arm is where the assembly shows it, 30 degrees round.
+    assert _close_pose(sdf_poses(sdf.find("world/model[@name='rig']"))["arm"], arm.world)
+    assert _limit(sdf) == {"lower": pytest.approx(math.radians(-120.0)), "upper": pytest.approx(math.radians(90.0))}
+    assert not any("start" in warning for warning in result["warnings"])
+
+
+def test_a_start_outside_its_bounds_is_reported(tmp_path, stand_in_geometry, export_world):
+    """Gazebo would throw such a joint against its stop at once: PartCAD's body rule says so, and the export with it.
+
+    'limits:' on a target interface are about its port's Z, the contact
+    frame's reversed: 'upper: 30' bounds the freedom below at -30, and -90 is
+    under it.
+    """
+    tree = rig(tmp_path, "motion: {type: revolute, limits: {upper: 30}}", params=", toParams: {turnZ: -90}")
+    found = kinematics.bodies(tree)
+    (problem,) = [problem for problem in found.problems if "outside its bounds" in problem]
+    result, _path, _sdf = export(export_world, tmp_path, tree)
+    assert problem in result["warnings"]
+    assert "'arm-base'" in problem and "-90 deg" in problem
+
+
+def test_a_joint_s_physics_are_its_dynamics_and_limits_in_si_about_its_start(tmp_path, stand_in_geometry, export_world):
     tree = rig(
         tmp_path,
         "parameters: {moveZ: [0, 50]}\nmotion: prismatic\n"
         "physics: {damping: 4, friction: 0.5, springStiffness: 100, springReference: 20, maxEffort: 30, "
         "maxVelocity: 250, erp: 0.2}",
+        params=", toParams: {moveZ: 5}",
     )
     result, _path, sdf = export(export_world, tmp_path, tree)
 
@@ -434,22 +533,47 @@ def test_a_joint_s_physics_are_its_dynamics_and_limits_in_si(tmp_path, stand_in_
     assert float(axis.findtext("dynamics/damping")) == pytest.approx(4.0)
     assert float(axis.findtext("dynamics/friction")) == pytest.approx(0.5)
     assert float(axis.findtext("dynamics/spring_stiffness")) == pytest.approx(100.0)
-    # A position of the joint: millimetres to metres, along the same axis.
-    freedom = kinematics.bodies(tree).by_name("arm").joint.freedoms[0]
-    assert abs(float(axis.findtext("dynamics/spring_reference"))) == pytest.approx(0.020)
+    # Positions of the joint: millimetres to metres, along the same axis, and
+    # about the start -- the spring's reference too.
+    joint = kinematics.bodies(tree).by_name("arm").joint
+    freedom = joint.freedoms[0]
+    assert abs(freedom.value) == pytest.approx(5.0)
+    shifted = kinematics.rezeroed(joint)
+    assert float(axis.findtext("dynamics/spring_reference")) == pytest.approx(shifted.spring_reference(0) / 1000.0)
+    assert shifted.spring_reference(0) == pytest.approx(20.0 - freedom.value)
     assert float(axis.findtext("limit/effort")) == pytest.approx(30.0)
     assert float(axis.findtext("limit/velocity")) == pytest.approx(0.25)
-    assert sorted(float(axis.findtext("limit/" + side)) for side in ("lower", "upper")) == pytest.approx(
-        sorted([freedom.lower / 1000.0, freedom.upper / 1000.0])
-    )
+    assert _limit(sdf)["lower"] == pytest.approx((freedom.lower - freedom.value) / 1000.0)
+    assert _limit(sdf)["upper"] == pytest.approx((freedom.upper - freedom.value) / 1000.0)
     assert "joint erp" in result["unsupported"]
+
+
+def test_a_ball_states_its_damping_and_reports_what_it_cannot_say(tmp_path, stand_in_geometry, export_world):
+    """DART applies a ball's '<axis>' to each of its three coordinates: a damper there is a damper, the rest a box."""
+    tree = rig(
+        tmp_path,
+        "motion: {type: ball, limits: {upper: 20}}\nphysics: {damping: 0.3, friction: 0.1, springStiffness: 2}",
+    )
+    assert kinematics.bodies(tree).by_name("arm").joint.turn_limit == 20.0
+    result, _path, sdf = export(export_world, tmp_path, tree)
+
+    joint = sdf.find(".//joint[@name='arm-base']")
+    assert joint.get("type") == "ball"
+    assert float(joint.findtext("axis/dynamics/damping")) == pytest.approx(0.3)
+    assert joint.find("axis/dynamics/friction") is None and joint.find("axis/dynamics/spring_stiffness") is None
+    assert joint.find("axis/limit") is None and joint.find("axis2") is None
+    assert any("'arm-base'" in warning and "friction, springStiffness" in warning for warning in result["warnings"])
+    assert any("bounded at 20 deg" in warning and "cone" in warning for warning in result["warnings"])
+    # And a ball with nothing to state on its '<axis>' has none.
+    _result, _path, plain = export(export_world, tmp_path, rig(tmp_path / "plain", "motion: ball"), "plain.world")
+    assert plain.find(".//joint[@name='arm-base']/axis") is None
 
 
 def test_a_screw_states_its_thread_in_the_units_of_the_version_written(tmp_path, stand_in_geometry, export_world):
     """10 mm a turn: radians a metre, left-handed positive, in 1.9; metres a turn, right-handed, from 1.10."""
     tree = rig(tmp_path, "threadStep: 10\nmotion: screw")
-    _result, _path, old = export(export_world, tmp_path, tree, "a.world")
-    _result, _path, new = export(export_world, tmp_path, tree, "b.world", version="1.10")
+    _result, _path, old = export(export_world, tmp_path, tree, "a.world", version="1.9")
+    _result, _path, new = export(export_world, tmp_path, tree, "b.world")
 
     radians_a_metre = float(old.findtext(".//joint[@name='arm-base']/thread_pitch"))
     metres_a_turn = float(new.findtext(".//joint[@name='arm-base']/screw_thread_pitch"))
@@ -462,43 +586,37 @@ MIMIC = """
 links:
   - part: base
   - part: arm
-    connect: {name: base, with: pin, to: bore, joint: drive}
+    connect: {name: base, with: pin, to: bore, joint: drive, toParams: {turnZ: 30}}
   - part: lid
     connect:
       name: arm
       with: pin
       to: bore
       joint: follower
+      toParams: {turnZ: -10}
       motion: {type: revolute, mimic: {joint: drive, multiplier: -2, offset: 15}}
 """
 
 
-def test_a_mimic_is_written_where_the_version_has_one_and_reported_where_it_has_not(
+def test_a_mimic_is_written_about_both_joints_starts_and_reported_where_the_version_has_none(
     tmp_path, stand_in_geometry, export_world
 ):
     tree = rig(tmp_path, "motion: revolute", assy=MIMIC)
-    result, _path, old = export(export_world, tmp_path, tree, "a.world")
-    _result, _path, new = export(export_world, tmp_path, tree, "b.world", version="1.11")
+    _result, _path, new = export(export_world, tmp_path, tree, "a.world")
+    result, _path, old = export(export_world, tmp_path, tree, "b.world", version="1.10")
 
     assert old.find(".//mimic") is None
     assert any("'follower' mimics 'drive'" in warning and "1.11" in warning for warning in result["warnings"])
     mimic = new.find(".//joint[@name='follower']/axis/mimic")
     assert mimic.get("joint") == "drive" and mimic.get("axis") == "axis"
     assert float(mimic.findtext("multiplier")) == pytest.approx(-2.0)
-    assert float(mimic.findtext("offset")) == pytest.approx(math.radians(15.0))
-
-
-def test_a_starting_value_is_reported_and_the_joint_written_at_zero(tmp_path, stand_in_geometry, export_world):
-    tree = rig(tmp_path, "parameters: {turnZ: [-90, 120]}\nmotion: revolute", params=", toParams: {turnZ: 30}")
-    result, _path, sdf = export(export_world, tmp_path, tree)
-
+    # 'v_f = m v_l + c' is 'e_f = m e_l + (c + m s_l - s_f)' once both count from their starts.
     found = kinematics.bodies(tree)
-    arm = found.by_name("arm")
-    assert abs(arm.joint.freedoms[0].value) == pytest.approx(30.0)
-    assert any("no starting position" in warning and "'arm-base' at" in warning for warning in result["warnings"])
-    model = sdf.find("world/model[@name='rig']")
-    at_zero = kinematics.compose(found.by_name("rig").world, arm.joint.location([0.0]))
-    assert _close_pose(sdf_poses(model)["arm"], at_zero)
+    leading, following = found.by_name("arm").joint.freedoms[0], found.by_name("lid").joint.freedoms[0]
+    assert (leading.value, following.value) == (30.0, -10.0)
+    offset = kinematics.rezeroed_offset(15.0, -2.0, leading.value, following.value)
+    assert offset == pytest.approx(15.0 - 60.0 + 10.0)
+    assert float(mimic.findtext("offset")) == pytest.approx(math.radians(offset))
 
 
 def test_a_free_root_is_free_to_move_only_when_asked_and_a_fixed_one_never(tmp_path, stand_in_geometry, export_world):
@@ -532,21 +650,43 @@ def test_flatten_is_reported_and_ignored(tmp_path, stand_in_geometry, export_wor
 SCENE_LOCATION = [[20.0, -30.0, 500.0], [1.0, 0.0, 0.0], 90.0]
 
 
-def _zero_world(found, body, zero_values):
-    if not isinstance(body.parent, kinematics.Body):
-        return body.world
-    return kinematics.compose(
-        _zero_world(found, body.parent, zero_values), body.joint.location(zero_values(body.joint))
-    )
+def _moved(joint):
+    """Gazebo's coordinates of 'joint' moved off its zero -- its start -- and the PartCAD values that puts it at.
+
+    A coordinate in SDFormat's units, as 'sdf_poses' takes it: radians or
+    metres, a pair for a universal joint, and a quaternion in the ball's own
+    frame for a ball.
+    """
+    starts = [freedom.value for freedom in joint.freedoms]
+    if joint.kind == kinematics.BALL:
+        rotation = urdf_common.axis_angle_to_quat((0.3, -0.5, 0.8), 40.0)
+        total = urdf_common.quat_mul(kinematics.rezeroed(joint).rotation, rotation)
+        return rotation, kinematics.turns_of(total, joint.classification.axes, starts)
+    if joint.kind == kinematics.UNIVERSAL:
+        steps = [17.0, -11.0]
+        return [math.radians(step) for step in steps], [start + step for start, step in zip(starts, steps)]
+    if joint.kind == kinematics.SCREW:
+        turn = next(freedom for freedom in joint.freedoms if freedom.kind == kinematics.TURN)
+        move = next(freedom for freedom in joint.freedoms if freedom.kind == kinematics.MOVE)
+        values = list(starts)
+        values[turn.index] += 17.0
+        values[move.index] = move.ratio * values[turn.index] + move.offset
+        return math.radians(17.0), values
+    (freedom,) = joint.freedoms
+    step = 17.0 if freedom.kind == kinematics.TURN else 3.0
+    return step / kinematics.per_si(freedom.kind), [freedom.value + step]
 
 
-@pytest.mark.parametrize("bore, kind, written, dummies", ROWS, ids=[_row_id(row) for row in ROWS])
-def test_every_part_is_where_partcad_puts_it_and_moves_as_partcad_says(
-    tmp_path, stand_in_geometry, export_world, bore, kind, written, dummies
+@pytest.mark.parametrize("label, bore, params, kind", JOINTED_ROWS, ids=_ids(JOINTED_ROWS))
+def test_at_gazebo_s_zero_every_part_is_where_the_assembly_shows_it_and_moved_where_partcad_puts_it(
+    tmp_path, stand_in_geometry, export_world, label, bore, params, kind
 ):
-    """At zero every part is where 'kinematics' puts it -- the tree as drawn, where it starts at zero -- and,
-    moved, every body is where the joint's own product puts it."""
-    tree = in_a_scene(rig(tmp_path, bore, params=_STARTS.get(kind, "")), SCENE_LOCATION)
+    """Re-zeroed: Gazebo's zero of every joint is its start, and Gazebo's 'e' is PartCAD's 's + e'.
+
+    Read back by SDFormat's own forward kinematics ('sdf_poses'), not by
+    anything the exporter computed.
+    """
+    tree = in_a_scene(rig(tmp_path, bore, params=params), SCENE_LOCATION)
     found = kinematics.bodies(tree)
     _result, _path, sdf = export(export_world, tmp_path, tree, static=False)
     model = sdf.find("world/model[@name='subject']")
@@ -554,91 +694,66 @@ def test_every_part_is_where_partcad_puts_it_and_moves_as_partcad_says(
 
     at_zero = sdf_poses(model)
     flat = _flat_poses(tree)
-    starts_at_zero = kind not in _STARTS
     for body in found:
-        expected = _zero_world(found, body, export_world.zero_values)
-        assert _close_pose(at_zero[links[body.name]], expected), body.name
+        assert _close_pose(at_zero[links[body.name]], body.world), body.name
         link = model.find("link[@name='%s']" % links[body.name])
         for index, part in enumerate(body.parts):
             visual = link.find("visual[@name='%s_visual_%d']" % (links[body.name], index))
             placed = urdf_common.compose(at_zero[links[body.name]], _pose(visual))
-            assert _close_pose(placed, kinematics.compose(expected, part.placement)), (body.name, part.label)
-            if starts_at_zero:
-                assert _close_pose(placed, flat[id(part.node)]), (body.name, part.label)
+            # The assembly as drawn, which is where every joint starts.
+            assert _close_pose(placed, flat[id(part.node)]), (body.name, part.label)
 
-    # Moved: every scalar freedom away from zero, a coupled one by its
-    # coupling, a ball turned any which way.
-    arm = found.by_name("arm")
-    joint = arm.joint
-    values = export_world.zero_values(joint)
-    for freedom in joint.freedoms:
-        if freedom.follows is None:
-            values[freedom.index] += 17.0 if freedom.kind == kinematics.TURN else 3.0
-    for freedom in joint.freedoms:
-        if freedom.follows is not None:
-            values[freedom.index] = freedom.ratio * values[freedom.follows] + freedom.offset
-    classification = joint.classification
-    turn = (0.3, -0.5, 0.8), 40.0
-    if kind in (kinematics.BALL, kinematics.FLOATING):
-        # The ball's quaternion is a turn in its own frame, the native joint's;
-        # kinematics' three turns are the same turn as three in sequence.
-        quaternion = urdf_common.axis_angle_to_quat(*turn)
-        first = 3 if kind == kinematics.FLOATING else 0
-        values[first:] = _three_turns(quaternion, classification.axes[first:])
-
-    coordinates = {}
-    if kind == kinematics.BALL:
-        coordinates["arm-base"] = urdf_common.axis_angle_to_quat(*turn)
-    elif kind == kinematics.UNIVERSAL:
-        coordinates["arm-base"] = [math.radians(values[0]), math.radians(values[1])]
-    else:
-        single = kind in (kinematics.REVOLUTE, kinematics.CONTINUOUS, kinematics.PRISMATIC, kinematics.SCREW)
-        for freedom in joint.freedoms:
-            if kind == kinematics.SCREW and freedom.kind == kinematics.MOVE:
-                continue
-            if kind == kinematics.FLOATING and freedom.kind == kinematics.TURN:
-                continue
-            name = "arm-base" if single else "arm-base." + export_world.freedom_label(freedom)
-            scale = math.pi / 180.0 if freedom.kind == kinematics.TURN else 0.001
-            coordinates[name] = values[freedom.index] * scale
-        if kind == kinematics.FLOATING:
-            coordinates["arm-base.ball"] = urdf_common.axis_angle_to_quat(*turn)
-    assert set(coordinates) == {name for name, _type in written}
-    moved = sdf_poses(model, coordinates)
+    joint = found.by_name("arm").joint
+    coordinates, values = _moved(joint)
+    moved = sdf_poses(model, {"arm-base": coordinates})
     expected = kinematics.compose(found.by_name("subject").world, joint.location(values))
     assert _close_pose(moved["arm"], expected, 1e-7), kind
 
 
-def _three_turns(quaternion, axes):
-    """The three angles (degrees) about 'axes', in order, that turn as 'quaternion' does -- by Newton's method."""
-    angles = [0.0, 0.0, 0.0]
+def test_a_floating_child_is_a_model_of_its_own_at_its_start_with_no_joint(tmp_path, stand_in_geometry, export_world):
+    tree = in_a_scene(rig(tmp_path, "motion: floating", params=", toParams: {moveZ: 100}"), SCENE_LOCATION)
+    found = kinematics.bodies(tree)
+    arm = found.by_name("arm")
+    assert arm.is_floating and arm.parent is None and arm.joint_parent is found.by_name("subject")
 
-    def turned(values):
-        pose = kinematics.IDENTITY
-        for axis, value in zip(axes, values):
-            moved = kinematics.motion(kinematics.TURN, axis, value)
-            pose = pose if moved is None else urdf_common.compose(pose, moved)
-        return pose[0]
+    _result, path, sdf = export(export_world, tmp_path, tree, static=False, names_file=True)
 
-    def error(values):
-        q = turned(values)
-        sign = 1.0 if sum(a * b for a, b in zip(q, quaternion)) >= 0 else -1.0
-        return [sign * a - b for a, b in zip(q, quaternion)][1:]
+    model = sdf.find("world/model[@name='arm']")
+    assert model.find("joint") is None and model.find("static") is None
+    assert [link.get("name") for link in model.findall("link")] == ["arm_link"]
+    assert sdf_joints(sdf) == [("subject-world", "fixed")]
+    # At its start: 100 mm along its connection from where its zero would be.
+    assert _close_pose(sdf_poses(model)["arm_link"], arm.world)
+    zero = kinematics.compose(found.by_name("subject").world, arm.joint.location([0.0] * 6))
+    assert math.dist(zero[1], arm.world[1]) == pytest.approx(100.0)
+    # What a run reads it by: the body, and the map that says what against.
+    entry = naming.read_sidecar(str(path))["joints"]["arm-base"]
+    assert entry == {"joint": "arm-base", "body": "arm", "map": json.loads(json.dumps(kinematics.joint_map(arm.joint)))}
+    assert entry["map"]["parent"] == "subject"
 
-    for _ in range(50):
-        current = error(angles)
-        if max(abs(v) for v in current) < 1e-14:
-            break
-        jacobian = []
-        for i in range(3):
-            step = list(angles)
-            step[i] += 1e-6
-            jacobian.append([(a - b) / 1e-6 for a, b in zip(error(step), current)])
-        import numpy
 
-        delta = numpy.linalg.solve(numpy.array(jacobian).T, -numpy.array(current))
-        angles = [a + float(d) for a, d in zip(angles, delta)]
-    return angles
+@pytest.mark.parametrize("label, bore, params, kind", JOINTED_ROWS, ids=_ids(JOINTED_ROWS))
+def test_the_sidecar_carries_each_joint_s_map_and_gazebo_s_zero_reads_its_start(
+    tmp_path, stand_in_geometry, export_world, label, bore, params, kind
+):
+    tree = in_a_scene(rig(tmp_path, bore, params=params), SCENE_LOCATION)
+    joint = kinematics.bodies(tree).by_name("arm").joint
+    _result, path, _sdf = export(export_world, tmp_path, tree, static=False, names_file=True)
+
+    entry = naming.read_sidecar(str(path))["joints"]["arm-base"]
+    assert entry["path"] == ["subject", "arm-base"] and entry["joint"] == "arm-base"
+    assert entry["map"]["kind"] == kind and entry["map"]["joint"] == "arm-base"
+    starts = dict(zip(joint.parameter_names(), [freedom.value for freedom in joint.freedoms]))
+    if kind == kinematics.BALL:
+        # Read from its links: the joint's frame in each, one frame at the start.
+        assert sorted(entry["ball"]) == ["child", "in_child", "in_parent", "parent"]
+        assert (entry["ball"]["parent"], entry["ball"]["child"]) == ("subject", "arm")
+        reading = kinematics.reading([entry], [urdf_common.IDENTITY_Q])
+    else:
+        reading = kinematics.reading([entry], [[0.0] * len(entry["map"]["coordinates"])])
+    pos = reading["pos"] if isinstance(reading["pos"], dict) else {joint.parameter_names()[0]: reading["pos"]}
+    assert pos == pytest.approx(starts)
+    assert reading["type"] == kind
 
 
 #
@@ -656,12 +771,12 @@ def gazebo():
         pytest.skip("no Gazebo here; see this file's docstring for running it in the simulation's image")
 
 
-@pytest.mark.parametrize("bore, kind, written, dummies", ROWS, ids=[_row_id(row) for row in ROWS])
-def test_in_gazebo_every_kind_of_joint_is_a_world_sdformat_accepts(
-    gazebo, tmp_path, stand_in_geometry, export_world, bore, kind, written, dummies
+@pytest.mark.parametrize("label, bore, params, kind", NATIVE_ROWS, ids=_ids(NATIVE_ROWS))
+def test_in_gazebo_every_native_joint_is_a_world_sdformat_accepts(
+    gazebo, tmp_path, stand_in_geometry, export_world, label, bore, params, kind
 ):
     (binary, _args, _topic), environment = gazebo
-    tree = in_a_scene(rig(tmp_path, bore), SCENE_LOCATION)
+    tree = in_a_scene(rig(tmp_path, bore, params=params), SCENE_LOCATION)
     _result, path, _sdf = export(export_world, tmp_path, tree, static=False, self_collide=True)
 
     checked = subprocess.run([binary, "sdf", "-k", str(path)], capture_output=True, text=True, env=environment)
@@ -687,6 +802,20 @@ def bar():
     }
 
 
+def lopsided():
+    """A body whose centre of mass is off every axis a joint of the rig turns about, so that gravity turns them all.
+
+    The bar's lies on the line of a universal joint's second turn, which
+    gravity then never turns.
+    """
+    return {
+        "volume": 1000.0,
+        "mass": 0.2,
+        "centerOfMass": [100.0, 70.0, 40.0],
+        "inertia": {"ixx": 5e-4, "iyy": 6e-4, "izz": 7e-4, "ixy": 0.0, "ixz": 0.0, "iyz": 0.0},
+    }
+
+
 def _complete_elliptic_k(k):
     """K(k), the complete elliptic integral of the first kind, by the arithmetic-geometric mean."""
     a, b = 1.0, math.sqrt(1.0 - k * k)
@@ -695,14 +824,152 @@ def _complete_elliptic_k(k):
     return math.pi / (2.0 * a)
 
 
+# Where a run's scene puts the rig: half a metre up and turned, so that every
+# frame along the way is one that is not the world's.
+PLACED = [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 30.0]
+# A gravity that is along no axis of anything, so that it turns every freedom.
+OBLIQUE = [3.0, -4.0, -9.0]
+# Gazebo's step, which the worlds here leave as it is: a millisecond.
+STEP = 0.001
+
+
+def _run(module, directory, tree, physics=None, **request):
+    """'tree' exported as a run exports it, and run in Gazebo: what 'pc sim' hands the validation."""
+    import simulate_gazebo
+
+    _result, path, _sdf = module_export(module, directory, tree, physics)
+    return simulate_gazebo.process(str(directory), dict({"scene_file": str(path)}, **request))
+
+
+def module_export(module, directory, tree, physics=None):
+    return export(
+        module,
+        directory,
+        tree,
+        "run.world",
+        static=False,
+        self_collide=True,
+        ground_plane=False,
+        names_file=True,
+        properties=weighed(tree, {"arm": physics or bar()}),
+    )
+
+
+def _values(joint, state):
+    """The values of a joint's freedoms, by index, out of what a run reported for it."""
+    names = joint.parameter_names()
+    pos = state["pos"] if isinstance(state["pos"], dict) else {names[0]: state["pos"]}
+    return [pos[name] for name in names]
+
+
+def _body(reading, name):
+    body = reading["bodies"][name]
+    return tuple(body["quat"]), tuple(body["pos"])
+
+
+def _readings(result):
+    """Every reading of a run, once each, in order."""
+    seen, out = set(), []
+    for reading in [result["before"]] + result.get("samples", []) + [result["after"]]:
+        if reading["time"] not in seen:
+            seen.add(reading["time"])
+            out.append(reading)
+    return out
+
+
+@pytest.mark.parametrize("label, bore, params, kind", NATIVE_ROWS, ids=_ids(NATIVE_ROWS))
+def test_in_gazebo_a_joint_started_away_from_its_zero_reads_its_start(
+    gazebo, tmp_path, stand_in_geometry, export_world, label, bore, params, kind
+):
+    """With nothing to move it, every joint reads its start -- not nought, Gazebo's -- and every body is there."""
+    tree = in_a_scene(rig(tmp_path, bore, params=params), PLACED)
+    found = kinematics.bodies(tree)
+    joint = found.by_name("arm").joint
+    result = _run(export_world, tmp_path, tree, duration=0.1, gravity=[0.0, 0.0, 0.0])
+
+    starts = [freedom.value for freedom in joint.freedoms]
+    for reading in (result["before"], result["after"]):
+        state = reading["joints"]["arm-base"]
+        assert state["type"] == kind
+        assert _values(joint, state) == pytest.approx(starts, abs=1e-6)
+        if kind in (kinematics.BALL, kinematics.FLOATING):
+            assert "quat" in state
+        for body in found:
+            assert _close_pose(_body(reading, body.name), body.world, 1e-6), body.name
+    assert "warnings" not in result
+
+
+@pytest.mark.parametrize("label, bore, params, kind", NATIVE_ROWS, ids=_ids(NATIVE_ROWS))
+def test_in_gazebo_every_reading_puts_the_body_where_gazebo_has_it(
+    gazebo, tmp_path, stand_in_geometry, export_world, label, bore, params, kind
+):
+    """The readings round trip: what a run reports, put through PartCAD's own joint, is where Gazebo has the body.
+
+    Under a gravity along no axis, so that every freedom moves; at every
+    reading, the child's pose is the pose of the body it moves against times
+    'joint.location()' of the values reported. Only a joint Gazebo built where
+    the export says, re-zeroed as the map says, passes that -- and only one
+    that moves passes the check that it moved, which a weld would fail.
+    """
+    tree = in_a_scene(rig(tmp_path, bore, params=params), PLACED)
+    found = kinematics.bodies(tree)
+    arm = found.by_name("arm")
+    joint = arm.joint
+    result = _run(export_world, tmp_path, tree, lopsided(), duration=0.4, samples=24, gravity=OBLIQUE)
+
+    readings = _readings(result)
+    for reading in readings:
+        values = _values(joint, reading["joints"]["arm-base"])
+        expected = kinematics.compose(_body(reading, arm.joint_parent.name), joint.location(values))
+        assert _close_pose(_body(reading, "arm"), expected, 1e-6), (kind, reading["time"])
+    starts = [freedom.value for freedom in joint.freedoms]
+    ended = _values(joint, result["after"]["joints"]["arm-base"])
+    moved = [abs(a - b) for a, b in zip(ended, starts)]
+    if kind == kinematics.SCREW:
+        assert moved[0] > 5.0
+    elif kind == kinematics.FLOATING:
+        assert max(moved) > 5.0
+    else:
+        assert min(moved) > 5.0, moved
+    print("%s: %s from %s" % (label, [round(value, 3) for value in ended], starts))
+    if kind == kinematics.BALL:
+        _check_ball_speed(readings)
+
+
+def _check_ball_speed(readings):
+    """A ball's 'vel' is the turn its rotation makes, over time: held to the readings either side of each."""
+    for before, reading, after in zip(readings, readings[1:], readings[2:]):
+        first, second = (tuple(r["joints"]["arm-base"]["quat"]) for r in (before, after))
+        turn = urdf_common.quat_mul((first[0], -first[1], -first[2], -first[3]), second)
+        if turn[0] < 0:
+            turn = tuple(-v for v in turn)
+        along = math.sqrt(sum(v * v for v in turn[1:]))
+        angle = math.degrees(2.0 * math.atan2(along, turn[0]))
+        rate = [v / along * angle / (after["time"] - before["time"]) for v in turn[1:]]
+        reported = reading["joints"]["arm-base"]["vel"]
+        size = math.sqrt(sum(v * v for v in rate))
+        # The difference over two pose messages, a thirtieth of a second, is
+        # good to a per cent or so of a swing; the reading's is over two steps.
+        assert max(abs(a - b) for a, b in zip(reported, rate)) <= 0.03 * size + 3.0, (reading["time"], reported, rate)
+
+
 @pytest.fixture(scope="module")
 def swung(gazebo, tmp_path_factory):
     """The bar released horizontal on a revolute joint about a horizontal axis, run in Gazebo for 1.5 s.
 
     The hinge is the bore's Z axis, which the scene turns to lie along world Y,
-    so that the bar, along the arm's X, starts horizontal at nought -- where
-    every joint starts in a world this exporter writes.
+    so that the bar, along the arm's X, starts horizontal at nought.
     """
+    return _pendulum(tmp_path_factory, "pendulum", "", duration=1.5, samples=3000)
+
+
+@pytest.fixture(scope="module")
+def wound(gazebo, tmp_path_factory):
+    """The same bar started half a turn round: horizontal the other way, on a hinge bounded on neither side."""
+    return _pendulum(tmp_path_factory, "wound", ", toParams: {turnZ: 180}", duration=0.5, samples=1000)
+
+
+def _pendulum(tmp_path_factory, name, params, **request):
     import _pytest.monkeypatch
 
     import simulate_gazebo
@@ -725,21 +992,12 @@ def swung(gazebo, tmp_path_factory):
         patch.setattr(ocp_serialize, "decode_shape", lambda obj: ("shape", obj.get("brep")))
         patch.setattr(module, "write_mesh", lambda shape, path, options: shutil.copyfile(CUBE_STL, path))
 
-        directory = tmp_path_factory.mktemp("pendulum")
-        tree = in_a_scene(rig(directory, "motion: revolute"), [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 90.0])
-        _result, path, _sdf = export(
-            module,
-            directory,
-            tree,
-            "pendulum.world",
-            static=False,
-            self_collide=True,
-            ground_plane=False,
-            properties=weighed(tree, {"arm": bar()}),
-        )
+        directory = tmp_path_factory.mktemp(name)
+        tree = in_a_scene(rig(directory, "motion: revolute", params=params), [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 90.0])
+        _result, path, _sdf = module_export(module, directory, tree)
     finally:
         patch.undo()
-    return simulate_gazebo.process(str(directory), {"scene_file": str(path), "duration": 1.5, "samples": 3000})
+    return simulate_gazebo.process(str(directory), dict({"scene_file": str(path)}, **request))
 
 
 def test_in_gazebo_a_pendulum_released_horizontal_passes_the_bottom_at_the_speed_its_fall_gives_it(swung):
@@ -753,7 +1011,8 @@ def test_in_gazebo_a_pendulum_released_horizontal_passes_the_bottom_at_the_speed
     before = swung["before"]
     accelerating = math.degrees(BAR_MASS * G * BAR_D / BAR_I_PIVOT)
     assert abs(before["joints"]["arm-base"]["pos"]) == pytest.approx(0.5 * accelerating * before["time"] ** 2, abs=0.1)
-    assert swung["before"]["joints"]["arm-base"]["type"] == "continuous"
+    # A hinge bounded on neither side is a revolute, as PartCAD calls it.
+    assert swung["before"]["joints"]["arm-base"]["type"] == "revolute"
     fastest = max(readings, key=lambda reading: abs(reading["vel"]))
     print(
         "pendulum: fastest %.3f deg/s at %.2f deg, against %.3f deg/s" % (abs(fastest["vel"]), fastest["pos"], expected)
@@ -793,26 +1052,216 @@ def test_in_gazebo_a_pendulum_released_horizontal_swings_with_the_period_of_one(
     assert crossings[1] - crossings[0] == pytest.approx(expected, rel=0.01)
 
 
-def test_in_gazebo_a_nut_on_a_screw_moves_as_its_thread_says(gazebo, tmp_path, stand_in_geometry, export_world):
-    """Pulled down its axis by its weight, the nut moves 10 mm for every turn, the way PartCAD couples them."""
-    import simulate_gazebo
+def test_in_gazebo_a_pendulum_started_half_a_turn_round_reads_its_start_and_its_bottom_unwrapped(wound):
+    """It reads 180 at the start, not Gazebo's nought, and passes the bottom at 90 or 270 -- never at -90.
 
-    tree = in_a_scene(rig(tmp_path, "threadStep: 10\nmotion: screw"), [[0.0, 0.0, 800.0], [0.0, 0.0, 1.0], 0.0])
-    _result, path, _sdf = export(export_world, tmp_path, tree, static=False, ground_plane=False, names_file=True)
-    result = simulate_gazebo.process(str(tmp_path), {"scene_file": str(path), "duration": 0.5})
+    A lost start would read the bottom at -90 or 90 from nought, and a reading
+    wrapped into +-180 would read 270 as -90; the speed there is the bar's
+    from 'swung', sqrt(2 m g d / I_pivot), since it falls as far.
+    """
+    expected = math.degrees(math.sqrt(2.0 * BAR_MASS * G * BAR_D / BAR_I_PIVOT))
+    before = wound["before"]["joints"]["arm-base"]
+    accelerating = math.degrees(BAR_MASS * G * BAR_D / BAR_I_PIVOT)
+    assert abs(before["pos"] - 180.0) == pytest.approx(0.5 * accelerating * wound["before"]["time"] ** 2, abs=0.1)
+    fastest = max((sample["joints"]["arm-base"] for sample in wound["samples"]), key=lambda state: abs(state["vel"]))
+    print("wound: fastest %.3f deg/s at %.2f deg, against %.3f deg/s" % (abs(fastest["vel"]), fastest["pos"], expected))
+    assert abs(fastest["vel"]) == pytest.approx(expected, rel=0.01)
+    assert min(abs(fastest["pos"] - 90.0), abs(fastest["pos"] - 270.0)) <= 5.0
 
+
+def test_in_gazebo_a_bound_stops_a_joint_where_partcad_puts_it_not_where_its_start_would(
+    gazebo, tmp_path, stand_in_geometry, export_world
+):
+    """The bar of 'swung' on a hinge bounded at +-45 degrees, started at 20: it falls to the stop, at 45 or -45.
+
+    Bounds written about PartCAD's zero rather than the start would stop it
+    at 65 or -25.
+    """
+    tree = in_a_scene(
+        rig(tmp_path, "parameters: {turnZ: [-45, 45]}\nmotion: revolute", params=", toParams: {turnZ: 20}"),
+        [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 90.0],
+    )
+    result = _run(export_world, tmp_path, tree, duration=0.6, samples=60, gravity=[0.0, 0.0, -G])
+
+    readings = [reading["joints"]["arm-base"]["pos"] for reading in _readings(result)]
+    # Started at 20, and a few steps under way at the first reading.
+    assert readings[0] == pytest.approx(20.0, abs=2.0)
+    stop = 45.0 if readings[-1] > 0 else -45.0
+    print("stopped: %.4f deg, the stop at %g" % (readings[-1], stop))
+    assert readings[-1] == pytest.approx(stop, abs=0.5)
+    assert max(abs(value) for value in readings) <= 45.5
+
+
+def test_in_gazebo_a_carriage_falls_from_its_start_to_its_stop(gazebo, tmp_path, stand_in_geometry, export_world):
+    """A slide bounded at [0, 100] mm, started at 50 and pulled toward 0: 50 - g t^2 / 2, and then 0 for good.
+
+    Bounds written about PartCAD's zero rather than the start would hold it
+    where it started, against a stop at nought.
+    """
+    tree = in_a_scene(
+        rig(tmp_path, "parameters: {moveZ: [0, 100]}\nmotion: prismatic", params=", toParams: {moveZ: 50}"),
+        [[0.0, 0.0, 500.0], [0.0, 0.0, 1.0], 0.0],
+    )
+    found = kinematics.bodies(tree)
+    joint = found.by_name("arm").joint
+    (freedom,) = joint.freedoms
+    assert (freedom.value, freedom.lower, freedom.upper) == (50.0, 0.0, 100.0)
+    # The world's direction of the slide's +1 mm, so that gravity can be set
+    # against it.
+    along = kinematics.rotate(kinematics.compose(found.by_name("subject").world, joint.frame(0)), freedom.axis)
+    result = _run(export_world, tmp_path, tree, duration=0.4, samples=40, gravity=[-G * v for v in along])
+
+    for reading in _readings(result):
+        t, pos = reading["time"], reading["joints"]["arm-base"]["pos"]
+        falling = 50.0 - 0.5 * G * 1000.0 * t * t
+        if falling > 5.0:
+            # A step of Gazebo's semi-implicit Euler runs a step ahead.
+            assert pos == pytest.approx(falling, abs=0.5), t
+        elif falling < -20.0:
+            assert pos == pytest.approx(0.0, abs=0.5), t
+    print("carriage: at %.4f mm after %.2f s" % (result["after"]["joints"]["arm-base"]["pos"], result["after"]["time"]))
+
+
+def test_in_gazebo_a_floating_child_falls_free_from_its_start(gazebo, tmp_path, stand_in_geometry, export_world):
+    """Its own model, held by nothing: g t^2 / 2 from where it started, 49.05 mm in 0.1 s.
+
+    To a step: Gazebo's semi-implicit Euler moves a body by its new speed, so
+    after n steps of dt it has fallen g dt^2 n (n + 1) / 2, which is
+    g t (t + dt) / 2.
+    """
+    tree = in_a_scene(rig(tmp_path, "motion: floating", params=", toParams: {moveZ: 100}"), PLACED)
     arm = kinematics.bodies(tree).by_name("arm")
-    move = next(freedom for freedom in arm.joint.freedoms if freedom.kind == kinematics.MOVE)
-    turned = result["after"]["joints"]["arm-base"]["pos"]
-    assert abs(turned) > 90.0
-    # Where the joint's own product puts the nut at that turn, along the world's
-    # Z -- which is where Gazebo has it.
-    values = [0.0, 0.0]
-    values[move.follows] = turned
-    values[move.index] = move.ratio * turned + move.offset
-    expected = kinematics.compose(kinematics.bodies(tree).by_name("subject").world, arm.joint.location(values))
-    # In the world's frame, as every body is reported: the nut's link composed
-    # with the model it is in, which the scene placed 800 mm up.
-    fallen = result["after"]["bodies"]["arm"]["pos"]
-    print("screw: turned %.2f deg, the nut at %s mm, PartCAD puts it at %s" % (turned, fallen, expected[1]))
-    assert fallen[2] == pytest.approx(expected[1][2], abs=0.2)
+    result = _run(export_world, tmp_path, tree, duration=0.15, samples=15, gravity=[0.0, 0.0, -G])
+
+    start = arm.world[1][2]
+    moves = [name for name, freedom in zip(arm.joint.parameter_names(), arm.joint.freedoms) if freedom.kind == "move"]
+    for reading in _readings(result):
+        t = reading["time"]
+        fallen = 0.5 * G * 1000.0 * t * (t + STEP)
+        assert reading["bodies"]["arm"]["pos"][2] == pytest.approx(start - fallen, abs=0.01), t
+        state = reading["joints"]["arm-base"]
+        assert state["type"] == kinematics.FLOATING
+        # Its speed, against a base that does not move, along the three moves
+        # (square to each other): g t, exactly. It is read as what the last
+        # step moved it by, which is the speed semi-implicit Euler ends a step
+        # with -- the engine's own -- where a difference across the reading
+        # would be the speed half a step on.
+        # At the first step there is no step before it to tell a speed by, and
+        # the next one's is read: a step on, at worst.
+        speed = math.sqrt(sum(state["vel"][name] ** 2 for name in moves))
+        expected = G * 1000.0 * (t if t > 1.5 * STEP else t + STEP)
+        assert speed == pytest.approx(expected, rel=1e-6, abs=1e-6), t
+        # And it falls without turning.
+        assert max(abs(v) for v in state["vel"]["angular"]) < 1e-6
+    print(
+        "floating: fell %.3f mm in %.3f s, at %.4f mm/s"
+        % (
+            start - result["after"]["bodies"]["arm"]["pos"][2],
+            result["after"]["time"],
+            math.sqrt(sum(result["after"]["joints"]["arm-base"]["vel"][name] ** 2 for name in moves)),
+        )
+    )
+
+
+FLOATING_OFF_A_SWING = """
+links:
+  - part: base
+  - part: arm
+    connect: {name: base, with: pin, to: bore, joint: swing}
+  - part: lid
+    connect: {name: arm, with: pin, to: bore, joint: loose, motion: floating, toParams: {moveZ: -200}}
+"""
+
+
+def test_in_gazebo_a_floating_child_s_rates_against_a_body_that_turns_are_the_engine_s(
+    gazebo, tmp_path, stand_in_geometry, export_world
+):
+    """A lid falling free beside the bar of 'swung' as it swings: read against the bar, its freedoms all have rates.
+
+    Each is what the last step moved the two bodies by, put through PartCAD's
+    'kinematics.reading'. Held to answers that do not come from that:
+
+    * the lid turns against the bar at the bar's own speed, the other way --
+      it falls without turning -- which is what Gazebo's joint state says of
+      the hinge;
+    * every rate is what the same 'kinematics.reading' makes of the two
+      bodies' velocities as the engine holds them: the lid falling at exactly
+      g t (semi-implicit Euler), the bar turning about its hinge, through its
+      own origin, at the speed its joint state reports;
+    * and, loosely, each rate is the derivative of the lid's readings
+      themselves, a pose message a sixtieth of a second apart -- the
+      five-point difference either side, half a step back. Only loosely: the
+      engine's speeds are half a step behind its positions, and a rate
+      against a turning body is a speed taken at one position, which no curve
+      through the positions has as its derivative; the two differ by about
+      the bar's (angular speed squared plus angular acceleration) times the
+      lid's distance times half a step, ten or twenty mm/s by the end.
+    """
+    tree = in_a_scene(
+        rig(tmp_path, "motion: revolute", assy=FLOATING_OFF_A_SWING), [[0.0, 0.0, 500.0], [1.0, 0.0, 0.0], 90.0]
+    )
+    found = kinematics.bodies(tree)
+    lid, arm = found.by_name("lid"), found.by_name("arm")
+    assert lid.is_floating and lid.joint_parent is arm
+    result = _run(export_world, tmp_path, tree, duration=0.25, samples=30, gravity=[0.0, 0.0, -G])
+    assert "warnings" not in result
+
+    readings = _readings(result)
+    names = lid.joint.parameter_names()
+    joint_map = kinematics.joint_map(lid.joint)
+    hinge = kinematics.rotate(
+        kinematics.compose(found.by_name("subject").world, arm.joint.frame(0)), arm.joint.freedoms[0].axis
+    )
+    exact = 0.0
+    for reading in readings:
+        state = reading["joints"]["loose"]
+        # The lid's pose against the bar is where PartCAD's own joint puts it.
+        values = [state["pos"][name] for name in names]
+        expected = kinematics.compose(_body(reading, "arm"), lid.joint.location(values))
+        assert _close_pose(_body(reading, "lid"), expected, 1e-6), reading["time"]
+        if reading["time"] < 1.5 * STEP:
+            # No step before the first to tell a speed by.
+            continue
+        swing = math.radians(reading["joints"]["swing"]["vel"])
+        spin = math.sqrt(sum(v * v for v in state["vel"]["angular"]))
+        assert spin == pytest.approx(abs(math.degrees(swing)), rel=1e-6, abs=1e-6), reading["time"]
+        twists = (
+            ((0.0, 0.0, -G * reading["time"]), (0.0, 0.0, 0.0)),
+            ((0.0, 0.0, 0.0), tuple(swing * v for v in hinge)),
+        )
+        poses = [
+            (tuple(b["quat"]), tuple(v / 1000.0 for v in b["pos"]))
+            for b in (reading["bodies"]["lid"], reading["bodies"]["arm"])
+        ]
+        engine = kinematics.reading([joint_map], [tuple(poses)], [twists])["vel"]
+        for name in names:
+            assert state["vel"][name] == pytest.approx(engine[name], rel=1e-6, abs=1e-4), (reading["time"], name)
+            exact = max(exact, abs(state["vel"][name] - engine[name]))
+
+    worst = {name: 0.0 for name in names}
+    for around in zip(readings, readings[1:], readings[2:], readings[3:], readings[4:]):
+        times = [reading["time"] for reading in around]
+        h = (times[4] - times[0]) / 4.0
+        if max(abs(b - a - h) for a, b in zip(times, times[1:])) > 1e-9:
+            continue
+        for name in names:
+            f = [reading["joints"]["loose"]["pos"][name] for reading in around]
+            first = (-f[4] + 8.0 * f[3] - 8.0 * f[1] + f[0]) / (12.0 * h)
+            second = (-f[4] + 16.0 * f[3] - 30.0 * f[2] + 16.0 * f[1] - f[0]) / (12.0 * h * h)
+            difference = first - 0.5 * STEP * second
+            rate = around[2]["joints"]["loose"]["vel"][name]
+            assert rate == pytest.approx(difference, rel=3e-2, abs=30.0), (times[2], name, rate, difference)
+            worst[name] = max(worst[name], abs(rate - difference))
+    swung = abs(result["after"]["joints"]["swing"]["pos"])
+    assert swung > 30.0
+    fastest = {name: max(abs(r["joints"]["loose"]["vel"][name]) for r in readings) for name in names}
+    print(
+        "floating off a swing: the bar at %.1f deg; fastest rates %s; against the engine's within %.2e; "
+        "against the readings' differences within %s"
+        % (
+            swung,
+            {name: round(value, 2) for name, value in fastest.items()},
+            exact,
+            {name: round(value, 3) for name, value in worst.items()},
+        )
+    )

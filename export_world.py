@@ -44,14 +44,21 @@ exporter writes what it returns:
     its link, at its place in the body, both referencing a mesh written next to
     the world file; the link's ``<inertial>`` is the body's, its parts combined
     by PartCAD,
-  * every joint is SDFormat's own, by what 'kinematics.classify' says it is
-    (see 'Planner.jointed'): a ``revolute`` -- never a ``continuous``, which
-    Gazebo's DART builds as a fixed joint, so an unlimited turn is a revolute
-    with no ``<limit>`` --, a ``prismatic``, a ``screw`` with its thread pitch,
-    a ``universal`` and a ``ball``; and anything SDFormat has no type for -- a
-    cylindrical or a planar joint, a floating one inside a tree, any other
-    combination -- a chain of those through dummy links (see 'DUMMY_MASS'),
-    which is reported.
+  * every joint is one SDFormat joint of SDFormat's own type, by what
+    'kinematics.classify' says it is (see 'Planner.jointed', and section 8.13.4
+    of PartCAD's simulation design record): a ``revolute`` -- never a
+    ``continuous``, which Gazebo's DART builds as a fixed joint, so a turn
+    bounded on neither side is a revolute with no ``<lower>`` or ``<upper>`` --,
+    a ``prismatic``, a ``screw`` with its thread pitch, a ``universal`` and a
+    ``ball``. Those are the five Harmonic's DART builds. A cylindrical, a planar
+    (either order) or a composite joint has no SDFormat type, and the export
+    **refuses** it ('Refused') rather than write it as something it is not:
+    the links of a gram it used to put between the freedoms stood for bodies a
+    mechanism really has, with a mass nobody measured.
+  * the child of a floating joint holds nothing and is held by nothing: it is a
+    ``<model>`` of its own, at its start, with no joint at all -- SDFormat's
+    free body. The body it was connected to is what a run reads its pose
+    against.
 
 **Names.** Every name is PartCAD's wherever SDFormat can hold it, and is
 otherwise transcoded by PartCAD's 'naming' under SDFormat's own rules (see
@@ -63,24 +70,26 @@ model, and Gazebo needs the first: it reports every pose by the entity's bare
 name, and a model whose link shared its name was reported where its link sits
 in it -- at the origin, for ever. So the models, links and joints of a world
 share one transcoder, and PartCAD's names are claimed in it before anything
-this exporter names itself (a model's '<model>_link', a dummy link, the ground
-plane), so that those are the ones told apart. A joint written as one SDFormat
-joint keeps PartCAD's name, which is what a validation reads; one written as
-several is '<name>.<parameter>' for each, which is the name the MJCF exporter
-gives the MuJoCo joint of the same freedom. With ``names_file: true`` -- what the
-simulation asks for -- which name each became, and where each body and joint is
-(its model and its link), is written beside the world as '<file>.names.json',
-and the run reports under PartCAD's names by reading it.
+this exporter names itself (a model's '<model>_link', the ground plane), so
+that those are the ones told apart. Every joint keeps PartCAD's name, which is
+what a validation reads. With ``names_file: true`` -- what the simulation asks
+for -- which name each became, where each body and joint is (its model and its
+link), and each joint's map back into PartCAD's terms ('kinematics.joint_map')
+is written beside the world as '<file>.names.json', and the run reports under
+PartCAD's names and in PartCAD's terms by reading it.
 
-**Frames.** A link's frame is its body's own, so a part sits in its link where
-the body holds it and the inertial is the body's as PartCAD combined it. Every
-link is written where its joint puts it with every freedom at *zero* (see
-'STARTS_NOT_WRITTEN'), in its model's frame; a joint's ``<pose>`` is the frame
-it turns or slides in, relative to its child link as SDFormat reads it by
-default; and its ``<axis><xyz>`` is expressed in its *parent* link, the frame
-'kinematics.Joint.axis_in_parent' states it in. So Gazebo's zero of a joint is
-PartCAD's zero, its limits are the ones declared, and the joint states a run
-reports are PartCAD's values.
+**Frames, and where a joint starts.** A link's frame is its body's own, so a
+part sits in its link where the body holds it and the inertial is the body's as
+PartCAD combined it. SDFormat states no starting value for a joint (see
+'Planner.jointed'), so every joint is **re-zeroed** at its start
+('kinematics.rezeroed', section 8.13.5 of the design record): every link is
+written where the assembly shows it, in its model's frame, and every joint's
+frame where that configuration puts it, so that Gazebo's zero of each joint *is*
+PartCAD's start. A joint's ``<pose>`` is that frame relative to its child link,
+as SDFormat reads it by default; its ``<axis><xyz>`` is expressed in its
+*parent* link. Everything stated about a position shifts with the start -- a
+bound, a spring's reference, a mimic's offset -- and the joint map in the
+sidecar says how to add it back, so a run reports PartCAD's values.
 
 Two things this exporter decides that the file does not say, because a static
 arrangement does not say them and a *simulation* needs both:
@@ -89,11 +98,11 @@ arrangement does not say them and a *simulation* needs both:
     SDFormat that is a model with no joint to the world. ``static: true`` (the
     default, for a file somebody opens to look at) welds every such body to the
     world instead: a model with nothing moving in it is ``<static>``, as it
-    always was, and the root of a mechanism gets a fixed joint to ``world``, so
-    that the joints *inside* an assembly still move -- a pendulum exported on
-    its own still swings on its hinge. A body ``fixed`` to the world gets that
-    fixed joint whatever ``static`` says. ``static: false`` is what the
-    simulation asks for.
+    always was -- a floating child included --, and the root of a mechanism
+    gets a fixed joint to ``world``, so that the joints *inside* an assembly
+    still move -- a pendulum exported on its own still swings on its hinge. A
+    body ``fixed`` to the world gets that fixed joint whatever ``static`` says.
+    ``static: false`` is what the simulation asks for.
   * **What it stands on.** ``sun`` and ``ground_plane`` are what makes the
     file usable rather than what the scene says.
 
@@ -264,23 +273,20 @@ TURN = kinematics.TURN
 MOVE = kinematics.MOVE
 IDENTITY = kinematics.IDENTITY
 
-# What SDFormat 1.9 means by "no bound": the default of an open '<lower>' and
-# '<upper>'. A joint bounded on one side only is written with this on the
-# other, which is also the line the simulation beside this draws between a
-# 'revolute' and a 'continuous' it reports (see 'simulate_gazebo.NO_LIMIT').
-NO_LIMIT = 1.0e16
-
-# A dummy link -- one between two freedoms of a joint SDFormat has no single
-# type for -- weighs this much (kg) and turns this hard (kg.m^2 about each
-# axis): enough for Gazebo's physics to accept it, too little to matter beside
-# a part. The URDF exporter's numbers, for the same problem.
-DUMMY_MASS = 1.0e-3
-DUMMY_INERTIA = 1.0e-6
-
-# What an SDFormat joint written for one freedom of a joint of several is called
-# after the PartCAD joint's name: '<name>.<parameter>', as the MJCF exporter
-# names the MuJoCo joint of the same freedom, so that one validation reads both.
-FREEDOM_SEPARATOR = "."
+# The SDFormat joint each kind of joint 'kinematics.classify()' finds is written
+# as: SDFormat's own type, for the five of them Gazebo Harmonic's DART builds
+# (gz-physics 7, 'dartsim/src/SDFFeatures.cc', 'ConstructSdfJoint'). DART builds
+# anything else -- 'continuous', 'revolute2', 'gearbox' -- as a weld, with a
+# 'gzerr' line in the server's log and nothing failing, which is why a turn
+# bounded on neither side is a 'revolute' and never a 'continuous'. A floating
+# joint is no joint at all: its child is a model of its own (see 'Planner.free').
+NATIVE = {
+    kinematics.REVOLUTE: "revolute",
+    kinematics.PRISMATIC: "prismatic",
+    kinematics.SCREW: "screw",
+    kinematics.UNIVERSAL: "universal",
+    kinematics.BALL: "ball",
+}
 
 # PartCAD joint physics -> what '<axis><dynamics>' calls it. Per unit of the
 # joint's own motion in SI already, as PartCAD states them (N.m.s/rad or N.s/m,
@@ -294,6 +300,15 @@ JOINT_LIMITS = {"maxEffort": "effort", "maxVelocity": "velocity"}
 # Every joint property this exporter has a spelling for; anything else a joint
 # states (the ODE settings a URDF's '<gazebo>' block carried, say) is reported.
 JOINT_STATED = frozenset(JOINT_DYNAMICS) | frozenset(JOINT_LIMITS) | {SPRING_REFERENCE}
+# What a ball's '<axis>' carries. SDFormat's specification gives a ball no axis
+# at all; Harmonic's DART applies one's damping, friction, spring and limits to
+# each of the three coordinates of its 'BallJoint' ('ConstructBallJoint'). For a
+# damper that is a damper about every line through the centre, which is what a
+# ball's damping means; for a spring, a friction or a bound it is a box over the
+# components of a rotation vector, which is not what any of them means. So the
+# damping is written, and the rest is reported (section 8.13.4 of PartCAD's
+# simulation design record).
+BALL_DYNAMICS = ("damping",)
 
 # The first SDFormat versions with each of these. A screw's pitch is
 # '<thread_pitch>' before 1.10 -- radians per metre, positive for a left-handed
@@ -304,24 +319,36 @@ JOINT_STATED = frozenset(JOINT_DYNAMICS) | frozenset(JOINT_LIMITS) | {SPRING_REF
 SCREW_THREAD_PITCH_SINCE = (1, 10)
 MIMIC_SINCE = (1, 11)
 
-# What is said about the starting value of a joint, which this does not write.
-# SDFormat 1.9 has no starting position: '<axis><initial_position>' was in 1.6
-# to 1.8 and went with 1.9, and Gazebo never read it. Nor does Harmonic's
-# gz-sim reset a joint from anything a world states: the 'SetModelState'
-# system that does is Ionic's. So every joint is written at zero -- the links
-# where their joints put them at zero, which is what makes a reading of a joint
-# PartCAD's value and its limits the declared ones -- and each joint that starts
-# elsewhere in the assembly is named. The URDF exporter says the same, for the
-# same reason.
-STARTS_NOT_WRITTEN = (
-    "SDFormat %s states no starting position for a joint, so every joint is written at zero; these start "
-    "elsewhere in the assembly: %s"
-)
-
 FLATTEN_GONE = (
     "'flatten' is no longer an option of this export, and is ignored: which nodes are bodies is PartCAD's "
     "body rule - every element of a scene a body of its own, everything in an assembly attached"
 )
+
+
+class Refused(ValueError):
+    """The joints Gazebo has no joint for, which the export will not write as something they are not.
+
+    'joints' is '(name, kind)' for each, every one the world has, found before
+    anything is written. The message names them, says why, and gives the
+    ways on.
+    """
+
+    def __init__(self, joints):
+        self.joints = list(joints)
+        super().__init__(refusal(self.joints))
+
+
+def refusal(joints) -> str:
+    """Why a world of these joints is not written, and what to do instead (section 8.13.4 of the design record)."""
+    named = ", ".join("the %s joint '%s'" % (kind, name) for name, kind in joints)
+    return (
+        "Gazebo cannot simulate %s: the joints SDFormat has and Gazebo Harmonic's DART builds are revolute, "
+        "prismatic, screw, universal and ball, and the only way to write another is through links of a mass nobody "
+        "measured, which this export does not invent. Either simulate the mechanism in MuJoCo "
+        "(partcad-sim-mujoco), which writes every type; or model the body the joint stands for - for a cylindrical "
+        "pair a sleeve and its carriage, for a planar joint the carriage its moves slide, for a composite the "
+        "carriage or the ring between its freedoms - and join it by native joints" % named
+    )
 
 
 def _bool_text(value):
@@ -549,7 +576,7 @@ def gravity_of(request, world):
 
 def per_si(kind) -> float:
     """PartCAD's units of a freedom per SDFormat's: degrees per radian, millimetres per metre."""
-    return 180.0 / math.pi if kind == TURN else urdf_common.MM_PER_M
+    return kinematics.per_si(kind)
 
 
 def to_si(kind, value):
@@ -568,61 +595,44 @@ def _number(value):
     return number if math.isfinite(number) else None
 
 
-def _shown(value, kind) -> str:
-    return "%g %s" % (value, "deg" if kind == TURN else "mm")
-
-
 def version_of(text):
-    """An SDFormat version as numbers, '1.9' -> (1, 9): what decides which elements a joint is written with."""
+    """An SDFormat version as numbers, '1.11' -> (1, 11): what decides which elements a joint is written with."""
     try:
         return tuple(int(part) for part in str(text).strip().split("."))
     except ValueError:
         return tuple(int(part) for part in gazebo_common.SDF_VERSION.split("."))
 
 
-def freedom_label(freedom) -> str:
-    """What an SDFormat joint of one freedom is called after its PartCAD joint's name: its parameter."""
-    if freedom.parameter:
-        return str(freedom.parameter)
-    return "%s%d" % (freedom.kind, freedom.index)
-
-
-def zero_values(joint):
-    """Where every freedom of 'joint' is with every SDFormat coordinate of it at zero.
-
-    Nought, but for a screw's coupled freedom, which a screw joint has no
-    coordinate of its own for: it is where its leader at nought puts it.
-    """
-    values = [0.0] * len(joint.freedoms)
-    if joint.kind == kinematics.SCREW:
-        for freedom in joint.freedoms:
-            if freedom.follows is not None:
-                values[freedom.index] = (freedom.ratio or 0.0) * values[freedom.follows] + (freedom.offset or 0.0)
-    return values
+def _pose_data(pose):
+    """A pose as plain data for the sidecar: '[[w, x, y, z], [x, y, z]]', millimetres."""
+    return [[float(v) for v in pose[0]], [float(v) for v in pose[1]]]
 
 
 class LinkPlan:
-    """One SDFormat link: a body, or a dummy link between two freedoms of one joint.
+    """One SDFormat link: one body.
 
     'frame' is where the link is in its model's frame -- which is its model's
-    root body's frame -- with every joint at zero.
+    root body's frame -- with every joint at its start, which is Gazebo's zero
+    of every joint (see 'Planner.jointed').
     """
 
-    def __init__(self, name, frame, body=None):
+    def __init__(self, name, frame, body):
         self.name = name
         self.frame = frame
         self.body = body
 
-    @property
-    def dummy(self) -> bool:
-        return self.body is None
-
     def __repr__(self):
-        return "<LinkPlan %s%s>" % (self.name, " (dummy)" if self.dummy else "")
+        return "<LinkPlan %s>" % self.name
 
 
 class AxisPlan:
-    """One '<axis>' or '<axis2>' of a joint: a unit vector in the joint's frame, and the freedom it moves."""
+    """One '<axis>' or '<axis2>' of a joint: a unit vector in the joint's frame, and the freedom it moves.
+
+    'freedom' is the 'kinematics.RezeroedFreedom' the axis is the coordinate
+    of -- its bounds, its start and its coupling in the engine's terms -- or
+    None for a ball's '<axis>', which is no coordinate and carries its damping
+    alone (see 'BALL_DYNAMICS').
+    """
 
     def __init__(self, vector, freedom, physics=True):
         self.vector = tuple(float(v) for v in vector)
@@ -637,20 +647,24 @@ class AxisPlan:
 class JointPlan:
     """One SDFormat joint, in the model's frame and PartCAD's units; 'write_joint' converts."""
 
-    def __init__(self, name, joint_type, parent, child, frame, source=None):
+    def __init__(self, name, joint_type, parent, child, frame, source=None, rezeroed=None):
         self.name = name
         self.type = joint_type
         # A LinkPlan, or None for the world.
         self.parent = parent
         self.child = child
-        # The frame the joint turns or slides in, in the model's frame.
+        # The frame the joint turns or slides in, in the model's frame, at
+        # Gazebo's zero -- the joint's start.
         self.frame = frame
         self.axes = []
         # A screw's: the metres a right-handed turn about its '<axis>' moves
         # the child along it.
         self.pitch = None
-        # The 'kinematics.Joint' it is written for, whose physics it states.
+        # The 'kinematics.Joint' it is written for, whose physics it states,
+        # and the same joint re-zeroed at its start ('kinematics.Rezeroed'),
+        # whose frames, bounds and offsets are what is written.
         self.source = source
+        self.rezeroed = rezeroed
 
     def __repr__(self):
         return "<JointPlan %s %s %s -> %s>" % (
@@ -678,7 +692,9 @@ class Planner:
     """The models, links and joints of a world for the bodies 'kinematics.bodies()' found.
 
     Plain data, and nothing written: 'write_model' turns it into SDFormat, and
-    the tests check it against the joints it came from, frame by frame.
+    the tests check it against the joints it came from, frame by frame. 'plan'
+    raises 'Refused', naming every joint Gazebo has no joint for at once, before
+    anything is written.
     """
 
     def __init__(self, found, names=None, version=None, static=True, warnings=None):
@@ -690,17 +706,18 @@ class Planner:
         self.warnings = warnings if warnings is not None else []
         self.unsupported = set()
         self.models = []
+        # (name, kind) of every joint SDFormat has no type for: 'Refused'.
+        self.refused = []
         # Body -> (its ModelPlan, its LinkPlan).
         self._placed = {}
-        # PartCAD joint name -> the (JointPlan, freedom) pairs it became: what a
-        # 'mimic' looks its leader up in.
+        # PartCAD joint name -> the JointPlan it became: what a 'mimic' looks
+        # its leader up in.
         self._written = {}
-        # The name a run reports each SDFormat joint by -> where it is (its
-        # model's and its own name) and the PartCAD joint it is (a freedom of):
-        # the sidecar's 'joints'. See 'joint_name'.
+        # The name a run reports each joint by -> where it is (its model's and
+        # its own name), the PartCAD joint it is, and its map back into
+        # PartCAD's terms: the sidecar's 'joints'. See 'joint_name'.
         self.reported = {}
         self._mimics = []
-        self._started = []
 
     def written(self):
         """The bodies this writes: every one with something in it or under it."""
@@ -723,16 +740,19 @@ class Planner:
                 continue
             if body.is_root:
                 self.root(body)
+                if body.is_floating:
+                    self.free(body)
             elif id(body.parent) in self._placed:
                 self.jointed(body)
+        if self.refused:
+            raise Refused(self.refused)
         for model in self.models:
             self.weld(model)
         self._resolve_mimics()
-        if self._started:
-            self.warnings.append(STARTS_NOT_WRITTEN % (self.version_text, ", ".join(self._started)))
         return self
 
     def root(self, body):
+        """A model for a body nothing holds, at that body's pose -- for a floating child, where it starts."""
         model = ModelPlan(self.names.claim(body.name, "body", "model"), body.world, body)
         link = LinkPlan(self.names.derive("%s_link" % model.name, "link"), IDENTITY, body)
         model.links.append(link)
@@ -755,74 +775,107 @@ class Planner:
         name = self.names.derive("%s-world" % model.name, "joint")
         model.joints.insert(0, JointPlan(name, "fixed", None, root, root.frame))
 
+    def free(self, body):
+        """The child of a floating joint: a model of its own ('root'), and what a run reads its joint by.
+
+        No joint is written -- a link with no joint is SDFormat's free body, and
+        DART gives it a 'FreeJoint' -- so the joint is in the sidecar alone: its
+        map ('kinematics.joint_map') says which body its pose is read against,
+        and 'body' which body it is.
+        """
+        joint = body.joint
+        name = joint.name or "%s-%s" % (body.name, body.joint_parent.name)
+        self.reported[name] = {"joint": joint.name, "body": body.name, "map": kinematics.joint_map(joint)}
+        if any(freedom.limited for freedom in joint.freedoms):
+            self.warnings.append(
+                "The floating joint '%s' bounds its freedoms, and a free body has no bounds: not written" % name
+            )
+        stated = sorted(set(joint.physics))
+        if stated:
+            self.warnings.append(
+                "The floating joint '%s' holds nothing, so there is nothing to state its %s on: not written"
+                % (name, ", ".join(stated))
+            )
+        self._not_one_axis(joint, "free body")
+
     def jointed(self, body):
-        """The joint (or chain of joints) of 'body' to its parent, and its link."""
+        """The joint of 'body' to its parent, re-zeroed at its start, and its link -- or a refusal.
+
+        Re-zeroed rather than written at PartCAD's zero with its start beside
+        it, because SDFormat states no starting value: '<axis><initial_position>'
+        was in 1.6 and 1.7, deprecated in 1.8 and gone from 1.9 on. Nor does
+        Gazebo Harmonic's gz-sim 8 start a joint anywhere a world says
+        ('SdfEntityCreator.cc' reads none): the system that would set one from
+        a '<model_state>' is gz-sim #2359, an unmerged draft. So the engine's
+        zero of every joint is made PartCAD's start instead
+        ('kinematics.rezeroed', section 8.13.5 of PartCAD's simulation design
+        record): the link where the assembly shows the body, the joint's frame
+        where that puts it, every position the joint states -- a bound, a
+        spring's reference, a mimic's offset -- shifted by the start, and the
+        joint map in the sidecar ('kinematics.joint_map') saying how to shift a
+        reading back. The URDF exporter is the one that keeps PartCAD's zero,
+        because what reads a URDF takes a joint's zero to be the hardware's; a
+        world is PartCAD's own, and only PartCAD's run reads its joints back.
+        """
         model, parent = self._placed[id(body.parent)]
         joint = body.joint
         name = joint.name or "%s-%s" % (body.name, body.parent.name)
         kind = joint.kind
-        classification = joint.classification
-        zero = zero_values(joint)
         base = parent.frame
-        child = LinkPlan(
-            self.names.claim(body.name, "body", "link"), kinematics.compose(base, joint.location(zero)), body
-        )
+        # Where the assembly shows the body: its joint at its start, which is
+        # where Gazebo's zero of the joint is.
+        child = LinkPlan(self.names.claim(body.name, "body", "link"), kinematics.compose(base, joint.location()), body)
+        # Placed even when its joint is refused, so that what hangs off it is
+        # planned too, and every refusal is named at once.
         self._placed[id(body)] = (model, child)
-
-        for freedom in joint.freedoms:
-            if freedom.follows is None and abs(freedom.value - zero[freedom.index]) > 1e-9:
-                self._started.append("'%s' at %s" % (name, _shown(freedom.value, freedom.kind)))
+        if kind not in NATIVE:
+            self.refused.append((name, kind))
+            return
+        classification = joint.classification
+        shifted = kinematics.rezeroed(joint)
+        model.links.append(child)
         self.unsupported.update("joint %s" % key for key in set(joint.physics) - JOINT_STATED)
         if joint.soft_limits:
             self.unsupported.add("joint softLimits")
 
-        if kind in (kinematics.REVOLUTE, kinematics.CONTINUOUS, kinematics.PRISMATIC):
-            (freedom,) = joint.freedoms
-            plan = self.single(model, name, joint, freedom, freedom.axis, parent, child, base, zero)
-            model.links.append(child)
-            self._written[joint.name] = [(plan, freedom)]
-            self._mimic(plan, joint)
-            return
-
-        native = kinematics.compose(base, classification.origin) if classification.origin else base
-        if kind == kinematics.SCREW:
-            model.links.append(child)
-            plan = self.screw(model, name, joint, parent, child, native)
-            self._mimic(plan, joint)
-            return
-        if kind == kinematics.UNIVERSAL:
-            model.links.append(child)
-            plan = JointPlan(self.joint_name(model, name, joint), "universal", parent, child, native, joint)
-            plan.axes = [AxisPlan(classification.axes[i], joint.freedoms[i]) for i in range(2)]
-            model.joints.append(plan)
-            self._written[joint.name] = [(plan, freedom) for freedom in joint.freedoms]
-            self._not_one_axis(joint, "universal")
-            return
-        if kind == kinematics.BALL:
-            model.links.append(child)
-            plan = JointPlan(self.joint_name(model, name, joint), "ball", parent, child, native, joint)
-            model.joints.append(plan)
-            self._written[joint.name] = [(plan, None)]
-            self._ball(name, joint, joint.freedoms)
-            self._not_one_axis(joint, "ball")
-            return
-        if kind == kinematics.FLOATING:
-            self.floating(model, name, joint, parent, child, native)
-            return
-        self.chain(model, name, joint, parent, child, base, zero)
-
-    def single(self, model, name, joint, freedom, vector, parent, child, frame, zero=None):
-        """One revolute or prismatic joint for one freedom; 'frame' is the freedom's own, or where the steps start."""
-        if zero is not None:
-            frame = kinematics.compose(frame, joint.frame(freedom.index, zero))
-        joint_type = "revolute" if freedom.kind == TURN else "prismatic"
-        plan = JointPlan(self.joint_name(model, name, joint), joint_type, parent, child, frame, joint)
-        plan.axes.append(AxisPlan(vector, freedom, physics=freedom.follows is None))
+        plan = JointPlan(
+            self.joint_name(model, name, joint),
+            NATIVE[kind],
+            parent,
+            child,
+            kinematics.compose(base, shifted.origin),
+            joint,
+            shifted,
+        )
         model.joints.append(plan)
-        return plan
+        self._written[joint.name] = plan
+        if kind == kinematics.SCREW:
+            joint_map = self.screw(plan, name)
+        elif kind == kinematics.BALL:
+            joint_map = self.ball(plan, name, parent, child)
+        else:
+            # A revolute or a prismatic joint's one axis, a universal joint's
+            # two: each its freedom's line in the joint's frame, which
+            # re-zeroing leaves where it was (8.13.5).
+            plan.axes = [AxisPlan(classification.axes[i], freedom) for i, freedom in enumerate(shifted.freedoms)]
+            joint_map = kinematics.joint_map(joint)
+        # A start outside the bounds -- which Gazebo would throw against its
+        # stop at the first step -- is PartCAD's to report, and is among the
+        # problems 'kinematics.bodies()' found ('outside_bounds').
+        self.reported[name]["map"] = joint_map
+        if kind in (kinematics.UNIVERSAL, kinematics.BALL):
+            self._not_one_axis(joint, kind)
+        else:
+            self._mimic(plan, joint)
 
-    def screw(self, model, name, joint, parent, child, frame):
-        """A screw: its turn is the joint's coordinate, and its move follows by the thread's pitch."""
+    def screw(self, plan, name):
+        """A screw: its turn is the joint's coordinate, and its move follows by the thread's pitch.
+
+        Returns its joint map, which says so: the turn the engine's
+        coordinate, and the move a follower of it -- 'kinematics.joint_map'
+        reads a screw by its turn whichever of its two freedoms leads.
+        """
+        joint, shifted = plan.source, plan.rezeroed
         classification = joint.classification
         turn = next(freedom for freedom in joint.freedoms if freedom.kind == TURN)
         move = next(freedom for freedom in joint.freedoms if freedom.kind == MOVE)
@@ -835,10 +888,7 @@ class Planner:
             per_degree = 1.0 / turn.ratio if turn.ratio else 0.0
         # Millimetres a degree, along the turn's own axis, to metres a turn.
         pitch = sense * per_degree * 360.0 / urdf_common.MM_PER_M
-        plan = JointPlan(self.joint_name(model, name, joint), "screw", parent, child, frame, joint)
-        plan.axes.append(AxisPlan(axis, turn, physics=turn.follows is None))
-        model.joints.append(plan)
-        self._written[joint.name] = [(plan, turn)]
+        plan.axes.append(AxisPlan(axis, shifted.freedoms[turn.index], physics=turn.follows is None))
         if abs(pitch) < 1e-12:
             plan.type = "revolute"
             self.warnings.append("The screw '%s' has a thread of nought, and is written as a revolute joint" % name)
@@ -853,75 +903,40 @@ class Planner:
             self.warnings.append(
                 "The screw '%s' bounds its move, and an SDFormat screw is bounded by its turn: not written" % name
             )
-        return plan
+        return kinematics.joint_map(joint)
 
-    def floating(self, model, name, joint, parent, child, frame):
-        """Three moves and a ball, through dummy links: a free joint is a model's, not a link's."""
-        classification = joint.classification
-        previous = parent
-        written, dummies = [], []
-        for index in range(3):
-            freedom = joint.freedoms[index]
-            # Every move leaves the frame the ball turns in where it was, so
-            # every dummy link sits there, at zero.
-            dummy = LinkPlan(self.names.derive("%s_link%d" % (name, index + 1), "link"), frame)
-            model.links.append(dummy)
-            dummies.append(dummy.name)
-            label = name + FREEDOM_SEPARATOR + freedom_label(freedom)
-            plan = self.single(model, label, joint, freedom, classification.axes[index], previous, dummy, frame)
-            written.append((plan, freedom))
-            previous = dummy
-        model.links.append(child)
-        ball = JointPlan(
-            self.joint_name(model, name + FREEDOM_SEPARATOR + "ball", joint), "ball", previous, child, frame
-        )
-        model.joints.append(ball)
-        self._written[joint.name] = written + [(ball, None)]
-        self._ball(name, joint, joint.freedoms[3:])
-        self._report_chain(name, joint, [plan.name for plan, _ in written] + [ball.name], dummies)
-        self._not_one_axis(joint, "chain")
+    def ball(self, plan, name, parent, child):
+        """A ball: no coordinate a joint state can carry, so read from its two links' poses.
 
-    def chain(self, model, name, joint, parent, child, base, zero):
-        """A joint SDFormat has no type for, as one single-axis joint per freedom through dummy links."""
-        freedoms = joint.freedoms
-        previous = parent
-        written, dummies = [], []
-        for index, freedom in enumerate(freedoms):
-            if index == len(freedoms) - 1:
-                link = child
-            else:
-                # Where the freedom leaves the frame at zero: the next one's
-                # parent, which it turns or slides with.
-                link = LinkPlan(
-                    self.names.derive("%s_link%d" % (name, index + 1), "link"),
-                    kinematics.compose(base, joint.frame(index, zero)),
-                )
-                dummies.append(link.name)
-            model.links.append(link)
-            label = name + FREEDOM_SEPARATOR + freedom_label(freedom)
-            plan = self.single(model, label, joint, freedom, freedom.axis, previous, link, base, zero)
-            written.append((plan, freedom))
-            previous = link
-        self._written[joint.name] = written
-
-        for plan, freedom in written:
-            if freedom.follows is None:
-                continue
-            leader_plan, leader = written[freedom.follows]
-            if self.version >= MIMIC_SINCE:
-                plan.axes[0].mimic = (
-                    leader_plan.name,
-                    "axis",
-                    freedom.ratio * per_si(leader.kind) / per_si(freedom.kind),
-                    to_si(freedom.kind, freedom.offset or 0.0),
-                )
-            else:
-                self.warnings.append(
-                    "'%s' follows '%s', and SDFormat %s has no <mimic> to say so (1.11 has): it moves freely"
-                    % (plan.name, leader_plan.name, self.version_text)
-                )
-        self._report_chain(name, joint, [plan.name for plan, _ in written], dummies)
-        self._not_one_axis(joint, "chain")
+        Returns its joint map, and records beside it -- under 'ball' in the
+        sidecar's entry -- the two bodies and the joint's frame in each of
+        their links, which is what a run turns their poses into the ball's
+        rotation by: the engine's rotation is the child's joint frame against
+        the parent's, both at Gazebo's zero where the ball starts.
+        """
+        joint = plan.source
+        if any(key in joint.physics for key in BALL_DYNAMICS):
+            plan.axes.append(AxisPlan((0.0, 0.0, 1.0), None))
+        dropped = sorted((set(joint.physics) & JOINT_STATED) - set(BALL_DYNAMICS))
+        if dropped:
+            self.warnings.append(
+                "The ball '%s' is given an <axis> for its damping alone, which Gazebo's DART applies to each of its "
+                "three coordinates: its %s would be a box over those coordinates, which is not what they mean for a "
+                "ball, and are not written" % (name, ", ".join(dropped))
+            )
+        if joint.turn_limit is not None:
+            self.warnings.append(
+                "The ball '%s' is bounded at %g deg from its zero, and SDFormat has no bound for a ball (Gazebo's "
+                "DART would bound each of its three coordinates, which is a box and not that cone): not written"
+                % (name, joint.turn_limit)
+            )
+        self.reported[name]["ball"] = {
+            "parent": parent.body.name,
+            "child": child.body.name,
+            "in_parent": _pose_data(kinematics.compose(kinematics.inverse(parent.frame), plan.frame)),
+            "in_child": _pose_data(kinematics.compose(kinematics.inverse(child.frame), plan.frame)),
+        }
+        return kinematics.joint_map(joint)
 
     def joint_name(self, model, name, joint):
         """The SDFormat name of the joint a run reports as 'name' (PartCAD's), recorded for the sidecar."""
@@ -934,29 +949,8 @@ class Planner:
         out = {}
         for model in self.models:
             for link in model.links:
-                if link.body is not None:
-                    out[link.body.name] = {"path": [model.name, link.name]}
+                out[link.body.name] = {"path": [model.name, link.name]}
         return out
-
-    def _report_chain(self, name, joint, written, dummies):
-        self.warnings.append(
-            "The %s joint '%s' has no SDFormat type: it is written as the joints %s through the dummy links %s, "
-            "each of %g kg" % (joint.kind, name, ", ".join(written), ", ".join(dummies), DUMMY_MASS)
-        )
-
-    def _ball(self, name, joint, turns):
-        """What a ball cannot state: SDFormat gives it no axis, so nothing that is said per axis."""
-        if any(freedom.limited for freedom in turns):
-            self.warnings.append(
-                "The joint '%s' is written as a ball, which SDFormat cannot bound: the limits of its turns are not "
-                "written" % name
-            )
-        stated = sorted(set(joint.physics) & JOINT_STATED)
-        if stated:
-            self.warnings.append(
-                "The joint '%s' is written as a ball, which SDFormat gives no axis to state them on: its %s are "
-                "not written" % (name, ", ".join(stated))
-            )
 
     def _not_one_axis(self, joint, kind):
         if joint.mimic:
@@ -970,27 +964,32 @@ class Planner:
 
     def _resolve_mimics(self):
         for plan, name, mimic in self._mimics:
-            leader = self._written.get(str(mimic["joint"])) or []
+            leader = self._written.get(str(mimic["joint"]))
             if self.version < MIMIC_SINCE:
                 self.warnings.append(
                     "The joint '%s' mimics '%s', and SDFormat %s has no <mimic> to say so (1.11 has): it moves freely"
                     % (name, mimic["joint"], self.version_text)
                 )
                 continue
-            if len(leader) != 1 or leader[0][1] is None or len(plan.axes) != 1:
+            if leader is None or len(leader.axes) != 1 or leader.axes[0].freedom is None or len(plan.axes) != 1:
                 self.warnings.append(
                     "The joint '%s' mimics '%s', and SDFormat can say that only of a joint of one axis following "
                     "another: it is not written" % (name, mimic["joint"])
                 )
                 continue
-            (leader_plan, leader_freedom), follower = leader[0], plan.axes[0].freedom
+            leading, following = leader.axes[0].freedom, plan.axes[0].freedom
             multiplier = _number(mimic.get("multiplier"))
             multiplier = 1.0 if multiplier is None else multiplier
+            # 'v_f = m v_l + c' in PartCAD's values is 'e_f = m e_l + (c + m s_l - s_f)' in the engine's, both
+            # joints re-zeroed at their starts (8.13.5).
+            offset = kinematics.rezeroed_offset(
+                _number(mimic.get("offset")) or 0.0, multiplier, leading.start, following.start
+            )
             plan.axes[0].mimic = (
-                leader_plan.name,
+                leader.name,
                 "axis",
-                multiplier * per_si(leader_freedom.kind) / per_si(follower.kind),
-                to_si(follower.kind, _number(mimic.get("offset")) or 0.0),
+                multiplier * per_si(leading.kind) / per_si(following.kind),
+                to_si(following.kind, offset),
             )
 
 
@@ -1025,7 +1024,8 @@ def write_model(world, plan, state):
     if state["options"]["self_collide"]:
         # SDFormat's links of one model pass through each other unless the
         # model says otherwise. Gazebo's DART never collides the two links of
-        # one joint; the two ends of a chain through dummy links are not that.
+        # one joint; two links of one mechanism that no joint joins -- a part
+        # on a turning arm and the frame the arm turns in -- collide only so.
         sub(model, "self_collide", "true")
     for link in plan.links:
         write_link(model, link, state)
@@ -1040,11 +1040,6 @@ def write_link(model, plan, state):
     link.set("name", plan.name)
     if not urdf_common.is_identity(plan.frame):
         sub(link, "pose", gazebo_common.format_pose(plan.frame))
-    if plan.dummy:
-        inertia = {key: 0.0 for key in ("ixy", "ixz", "iyz")}
-        inertia.update(ixx=DUMMY_INERTIA, iyy=DUMMY_INERTIA, izz=DUMMY_INERTIA)
-        write_inertial(link, {"mass": DUMMY_MASS, "inertia": inertia})
-        return link
 
     body = plan.body
     # What the body's own node says decides how its parts touch things where a
@@ -1125,11 +1120,16 @@ def write_joint(model, plan, state):
 
 
 def write_axis(element, axis, vector, plan, state):
-    """One axis: its direction, its dynamics, its limits, and what it mimics."""
+    """One axis: its direction, its dynamics, its limits, and what it mimics -- in the engine's terms.
+
+    Everything that is a position of the joint is the re-zeroed joint's
+    ('plan.rezeroed'): a bound and a spring's reference are PartCAD's less the
+    start, so that they are where PartCAD says they are while Gazebo counts the
+    joint from its start (section 8.13.5 of the design record).
+    """
     xyz = sub(element, "xyz", _vector(vector))
     xyz.set("expressed_in", plan.parent.name)
     freedom = axis.freedom
-    kind = freedom.kind
     physics = plan.source.physics if (plan.source is not None and axis.physics) else {}
 
     def number(key):
@@ -1140,24 +1140,40 @@ def write_axis(element, axis, vector, plan, state):
             )
         return value
 
+    def write_dynamics(dynamics):
+        if any(value is not None for value in dynamics.values()):
+            block = sub(element, "dynamics")
+            for tag in ("damping", "friction", "spring_reference", "spring_stiffness"):
+                if dynamics.get(tag) is not None:
+                    sub(block, tag, _text(dynamics[tag]))
+
+    if freedom is None:
+        # A ball's, which is no coordinate: its damping alone (see
+        # 'BALL_DYNAMICS'), and nothing that is a position.
+        write_dynamics({JOINT_DYNAMICS[key]: number(key) for key in BALL_DYNAMICS})
+        return
+
+    kind = freedom.kind
     dynamics = {tag: number(key) for key, tag in JOINT_DYNAMICS.items()}
-    dynamics["spring_reference"] = to_si(kind, number(SPRING_REFERENCE))
-    if any(value is not None for value in dynamics.values()):
-        block = sub(element, "dynamics")
-        for tag in ("damping", "friction", "spring_reference", "spring_stiffness"):
-            if dynamics[tag] is not None:
-                sub(block, tag, _text(dynamics[tag]))
+    if number(SPRING_REFERENCE) is not None:
+        dynamics["spring_reference"] = to_si(kind, plan.rezeroed.spring_reference(freedom.index))
+    write_dynamics(dynamics)
 
     effort = number("maxEffort")
     velocity = to_si(kind, number("maxVelocity"))
-    if freedom.limited or effort is not None or velocity is not None:
-        # Both bounds, an open one as SDFormat's own "none": '<lower>' and
-        # '<upper>' are required wherever there is a '<limit>' at all.
-        lower = to_si(kind, freedom.lower) if freedom.lower is not None else -NO_LIMIT
-        upper = to_si(kind, freedom.upper) if freedom.upper is not None else NO_LIMIT
+    lower, upper = to_si(kind, freedom.lower), to_si(kind, freedom.upper)
+    if lower is not None and upper is not None:
+        lower, upper = min(lower, upper), max(lower, upper)
+    if lower is not None or upper is not None or effort is not None or velocity is not None:
+        # A side that is open is left out. From SDFormat 1.10 on an omitted
+        # '<lower>' is -inf and an omitted '<upper>' +inf, which DART takes as
+        # no stop on that side ('CopyStandardJointAxisProperties'); 1.9's
+        # default was 1e16, which this used to write out (section 8.13.6).
         limit = sub(element, "limit")
-        sub(limit, "lower", _text(min(lower, upper)))
-        sub(limit, "upper", _text(max(lower, upper)))
+        if lower is not None:
+            sub(limit, "lower", _text(lower))
+        if upper is not None:
+            sub(limit, "upper", _text(upper))
         if effort is not None:
             sub(limit, "effort", _text(effort))
         if velocity is not None:
@@ -1190,7 +1206,6 @@ def process(path, request):
     world_name = scene_names.claim(scene_name, "scene", stem)
     mesh_dir_name = request.get("mesh_dir") or "%s_meshes" % stem
     mesh_dir = os.path.join(world_dir, mesh_dir_name)
-    os.makedirs(mesh_dir, exist_ok=True)
 
     warnings = []
     if request.get("flatten") is not None:
@@ -1261,7 +1276,10 @@ def process(path, request):
         add_sun(world)
     if request.get("ground_plane", True):
         add_ground_plane(world, state["names"])
+    # Planned before anything is written: a refusal ('Refused') leaves nothing
+    # behind, not even an empty directory for the meshes.
     planner.plan()
+    os.makedirs(mesh_dir, exist_ok=True)
     state["unsupported"].update(planner.unsupported)
     for model in planner.models:
         write_model(world, model, state)

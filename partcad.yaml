@@ -41,6 +41,16 @@ desc: Reading, writing, opening and simulating a Gazebo world, in SDFormat.
 # has no such module for in its sandbox, so the export would fail to import it.
 # #799 shipped in 0.8.204, and the run's wall-clock budget this simulation reads
 # as request["timeout"] (partcad/partcad#797) in 0.8.205.
+#
+# TODO(release): this must name the release that ships partcad/partcad#804,
+# which the world writer and the run are written against: 'kinematics' without
+# 'CONTINUOUS' or 'CHAIN', a floating child as a free body, 'rezeroed()',
+# 'joint_map()' and 'reading()' -- a free body's rates among what it reads --
+# and a start outside its bounds among the problems 'bodies()' finds. An older
+# PartCAD has none of the three functions in its sandbox, so the export fails
+# to plan its first joint. Set it once that
+# release exists; section 2 of PartCAD's simulation design record rules out a
+# fallback for an older one.
 partcad: ">=0.8.205"
 
 docs:
@@ -67,48 +77,53 @@ docs:
     is written by whoever wrote the part, against the numbers that part is drawn
     in.
 
-    Beside `bodies`, each reading carries a `joints` object: one entry per joint
-    of the world, by its name, in the vocabulary
-    [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) reports
-    joints in -- the terms an interface's `motion:` is written in:
+    Beside `bodies`, each reading carries a `joints` object: one entry per
+    PartCAD joint, under PartCAD's name for it, in the vocabulary
+    [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco)
+    reports joints in -- the terms an interface's `motion:` is written in,
+    counted from PartCAD's zero -- so one validation reads both engines:
 
-    | `type` | in SDFormat | `pos` | `vel` |
-    | --- | --- | --- | --- |
-    | `revolute` | a `revolute` with a `<limit>` | degrees | deg/s |
-    | `continuous` | a `revolute` without one | degrees | deg/s |
-    | `prismatic` | a `prismatic` | mm | mm/s |
-    | `screw` | a `screw`, by its turn | degrees | deg/s |
+    | `type` | `pos` | `vel` |
+    | --- | --- | --- |
+    | `revolute` | degrees | deg/s |
+    | `prismatic` | mm | mm/s |
+    | `screw` | `{turn: degrees, move: mm}` | the same, per second |
+    | `universal` | `{turn: degrees, turn: degrees}` | deg/s each |
+    | `ball` | its three turns, and `quat` (`w x y z`) | angular velocity, deg/s |
+    | `floating` | its six freedoms against the body it was connected to, and `quat` | by parameter, and `angular` |
 
-    `pos` is the joint's own coordinate, zero where the world placed the child
-    link. There is no `effort`, which the MuJoCo plugin reports: Gazebo's
-    joint state publisher leaves it empty even while a force is applied. A
-    `fixed` joint and the joints of a `<static>` model are not listed, since
-    nothing there moves; a ball joint (Gazebo publishes two of its three
-    coordinates), a `universal`, `revolute2` or `gearbox` one, and one Gazebo
-    ran with no freedom to move -- which is what Harmonic's DART makes of a
-    `continuous` joint, so write an unlimited `revolute` instead -- are named in
-    `warnings`. Two joints of one name in two models are reported as
-    `<model>::<joint>`. A world with no joints to read -- a scene of parts --
-    reports `joints: {}`, so a validation can walk `after["joints"]` without
-    asking first whether there is one.
+    `pos` is a number for a joint of one freedom and an object keyed by
+    parameter (`turnZ`, `moveZ`, ...) for one of several. It is read through
+    the joint map the export writes beside the world, by PartCAD's own
+    `kinematics.reading`. There is no `effort`, which the MuJoCo plugin
+    reports: Gazebo's joint state publisher leaves it empty even while a force
+    is applied. A `fixed` joint and the joints of a `<static>` model are not
+    listed, since nothing there moves. In a world PartCAD did not write, a
+    joint is reported by its own coordinate, and a ball, a `universal`,
+    `revolute2` or `gearbox` one, and one Gazebo ran with no freedom to move --
+    which is what Harmonic's DART makes of a `continuous` joint, so write a
+    `revolute` with no `<limit>` instead -- are named in `warnings`. A world
+    with no joints to read -- a scene of parts -- reports `joints: {}`, so a
+    validation can walk `after["joints"]` without asking first whether there is
+    one.
 
     ### Mechanisms
 
     A world is written from the bodies PartCAD's body rule finds: every
     element of a scene is a model, everything inside an assembly is attached
-    -- welded into one link, or jointed to it -- and an element marked
-    `fixed: true` is welded to the world. Each joint is SDFormat's own type
-    where SDFormat has one: an unlimited turn is a `revolute` with no
-    `<limit>`, never a `continuous`, which Gazebo's DART builds as a fixed
-    joint; a screw is a `screw` by its thread; two turns through a point a
-    `universal`; three a `ball`. Anything else -- cylindrical, planar,
-    floating inside a tree, any other combination -- is a chain of those
-    through dummy links of a gram, and the export says so. A joint written as
-    one keeps its PartCAD name; one written as several is
-    `<name>.<parameter>` for each, as the MuJoCo plugin names them. Every
-    joint is written at zero, its limits and dynamics as declared, in radians
-    and metres: SDFormat 1.9 has no starting position, and the export names
-    each joint whose `toParams` starts it elsewhere.
+    -- welded into one link, or jointed to it -- the child of a floating
+    joint is a model of its own, and an element marked `fixed: true` is
+    welded to the world. Each joint is one SDFormat joint of SDFormat's own
+    type, in SDFormat 1.11: a `revolute` (never a `continuous`, which
+    Gazebo's DART builds as a fixed joint), a `prismatic`, a `screw`, a
+    `universal` or a `ball`, under PartCAD's name. A cylindrical, a planar or
+    a composite joint has no SDFormat type, and the export refuses it, naming
+    it, its type and the two ways on -- simulate it in MuJoCo, or model the
+    body it stands for and join that by native joints -- rather than write it
+    through links of a mass nobody measured. Every joint is re-zeroed at its
+    start, since SDFormat states no starting value: Gazebo's zero is where the
+    assembly shows the joint, its bounds and the rest shift with it, and a run
+    adds the start back. A bound a joint leaves open is left out.
 
     ### Gazebo itself is not a Python package
 
@@ -223,10 +238,11 @@ export:
     static: true
     # Whether the links of one model -- the bodies of one mechanism -- collide
     # with each other. SDFormat says they do not unless the model says so.
-    # Gazebo's DART never collides the two links of one joint, but the two
-    # ends of a chain through dummy links are not that: with this on, those
-    # can. Off for a scene, which only states where things are; the
-    # simulation below turns it on.
+    # Gazebo's DART never collides the two links of one joint, but two links
+    # of one mechanism that no joint joins -- a part on a turning arm and the
+    # frame the arm turns in -- are not that: with this on, those can. Off
+    # for a scene, which only states where things are; the simulation below
+    # turns it on.
     self_collide: false
     # What makes the file usable rather than what the scene says: a world with
     # no light renders black, and one with no ground has nothing to stand on.
@@ -243,17 +259,19 @@ export:
     # '<file stem>_meshes' next to the world file, 'mesh_prefix' to empty (which
     # makes the mesh references relative to the world file; a Gazebo model
     # database sets it to 'model://<name>/'), 'version' to the SDFormat version
-    # 'gazebo_common.SDF_VERSION' names -- which also decides how a screw's
-    # thread is written ('<thread_pitch>' before 1.10, '<screw_thread_pitch>'
-    # from it) and whether a mimic is ('<mimic>' from 1.11; reported before,
-    # and not enforced by Gazebo Harmonic either way). 'density' (kg/m^3) is what PartCAD
-    # weighs a part at that states no density and is made of nothing that does,
-    # and defaults to aluminium's; PartCAD reads it, not this exporter, which is
-    # handed the masses already worked out.
+    # 'gazebo_common.SDF_VERSION' names, 1.11, the newest Gazebo Harmonic reads
+    # -- which also decides how a screw's thread is written ('<thread_pitch>'
+    # before 1.10, '<screw_thread_pitch>' from it) and whether a mimic is
+    # ('<mimic>' from 1.11; reported before, and not enforced by Gazebo
+    # Harmonic either way). A bound a joint leaves open is left out in every
+    # version, which from 1.10 is -inf or +inf and before it 1e16. 'density'
+    # (kg/m^3) is what PartCAD weighs a part at that states no density and is
+    # made of nothing that does, and defaults to aluminium's; PartCAD reads it,
+    # not this exporter, which is handed the masses already worked out.
     # world_name: <name>
     # mesh_dir: <directory>
     # mesh_prefix: <prefix>
-    # version: "1.9"
+    # version: "1.11"
     # density: 2700.0
     #
     # 'gravity' (m/s^2) writes the world's '<gravity>' over the scene's own.
