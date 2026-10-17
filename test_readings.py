@@ -279,12 +279,14 @@ def test_a_floating_child_is_read_as_its_pose_and_its_rates_against_the_body_it_
     assert world.find("model[@name='arm']/plugin").findtext("publish_model_pose") == "true"
 
     # Every freedom on the move, and the body it is read against moving and
-    # turning under it.
-    start = [40.0, -25.0, 130.0, 15.0, -30.0, 50.0]
-    rates = [100.0, -50.0, 20.0, 30.0, 10.0, -40.0]
+    # turning under it. By parameter: the order of a joint's freedoms is its
+    # declaration's, and nothing here should lean on it.
+    start = {"moveX": 40.0, "moveY": -25.0, "moveZ": 130.0, "turnX": 15.0, "turnY": -30.0, "turnZ": 50.0}
+    rates = {"moveX": 100.0, "moveY": -50.0, "moveZ": 20.0, "turnX": 30.0, "turnY": 10.0, "turnZ": -40.0}
+    assert sorted(joint.parameter_names()) == sorted(start)
 
     def values(t):
-        return [s + r * (t - 0.5) for s, r in zip(start, rates)]
+        return [start[name] + rates[name] * (t - 0.5) for name in joint.parameter_names()]
 
     def parent(t):
         moved = (urdf_common.axis_angle_to_quat((0.0, 0.6, 0.8), 90.0 * t), (200.0 * t, 0.0, -50.0 * t))
@@ -319,7 +321,7 @@ def test_a_floating_child_is_read_as_its_pose_and_its_rates_against_the_body_it_
 
     state = reading["joints"]["arm-base"]
     assert state["type"] == "floating"
-    assert state["pos"] == pytest.approx(dict(zip(joint.parameter_names(), start)))
+    assert state["pos"] == pytest.approx(start)
     assert len(state["quat"]) == 4
     vel = dict(state["vel"])
     assert len(vel.pop("angular")) == 3
@@ -327,7 +329,7 @@ def test_a_floating_child_is_read_as_its_pose_and_its_rates_against_the_body_it_
     # in the world -- which Gazebo's are, over one of its steps (semi-implicit
     # Euler) -- here a microsecond long, to be good to a part in a hundred
     # thousand.
-    assert vel == pytest.approx(dict(zip(joint.parameter_names(), rates)), rel=1e-5, abs=1e-3)
+    assert vel == pytest.approx(rates, rel=1e-5, abs=1e-3)
     assert warnings == []
 
 
@@ -337,7 +339,8 @@ def test_a_floating_child_whose_bodies_say_nothing_either_side_is_read_without_a
     world, names, found = exported(export_world, tmp_path, "motion: floating", ", toParams: {moveZ: 100}")
     joint = found.by_name("arm").joint
     parent = found.by_name("subject").world
-    child = kinematics.compose(parent, joint.location([100.0, 0.0, 0.0, 0.0, 0.0, 0.0]))
+    # At its start, whatever order its freedoms come in.
+    child = kinematics.compose(parent, joint.location(joint.values()))
     reading = {
         "time": 0.5,
         "bodies": {

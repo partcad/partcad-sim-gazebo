@@ -872,7 +872,8 @@ class Planner:
         """A screw: its turn is the joint's coordinate, and its move follows by the thread's pitch.
 
         Returns its joint map, which says so: the turn the engine's
-        coordinate, and the move a follower of it.
+        coordinate, and the move a follower of it -- 'kinematics.joint_map'
+        reads a screw by its turn whichever of its two freedoms leads.
         """
         joint, shifted = plan.source, plan.rezeroed
         classification = joint.classification
@@ -902,7 +903,7 @@ class Planner:
             self.warnings.append(
                 "The screw '%s' bounds its move, and an SDFormat screw is bounded by its turn: not written" % name
             )
-        return kinematics.joint_map(joint, freedoms=[turn.index], followers=[move.index])
+        return kinematics.joint_map(joint)
 
     def ball(self, plan, name, parent, child):
         """A ball: no coordinate a joint state can carry, so read from its two links' poses.

@@ -348,8 +348,8 @@ JOINTED_ROWS = [row for row in NATIVE_ROWS if row[3] != kinematics.FLOATING]
 REFUSED_ROWS = [
     ("cylindrical", "motion: cylindrical", "", kinematics.CYLINDRICAL),
     ("planar", "motion: planar", "", kinematics.PLANAR),
-    # 'toParams' puts what it names first: the turn, then the moves across it.
-    ("planar-turn-first", "motion: planar", ", toParams: {turnZ: 30}", kinematics.PLANAR),
+    # Declared the turn first, then the moves across it: 'dof' is the order.
+    ("planar-turn-first", "motion: {dof: [turnZ, moveX, moveY]}", ", toParams: {turnZ: 30}", kinematics.PLANAR),
     (
         "composite",
         "parameters: {turnZ: [-90, 90], moveX: [-5, 5]}\nmotion: {dof: [turnZ, moveX]}",
