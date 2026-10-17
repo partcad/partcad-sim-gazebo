@@ -5,8 +5,8 @@
 #
 """What a run says about the joints of a world (see 'Reading the joints' in 'simulate_gazebo.py').
 
-PartCAD's own exporter writes every model free today, so the worlds here are
-written by hand.
+The worlds here are written by hand, so that what is under test is the reading
+alone; 'test_export_joints.py' runs the worlds PartCAD's own exporter writes.
 
 Most of this needs no Gazebo, for the reason 'test_simulate_gazebo.py' gives:
 what the plugin does is read what a program says and turn it into what PartCAD
