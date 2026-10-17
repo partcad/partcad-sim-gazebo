@@ -36,10 +36,13 @@ import urdf_common
 # millimetres throughout; the same constant URDF is read and written with.
 MM_PER_M = urdf_common.MM_PER_M
 
-# The SDFormat version PartCAD writes. 1.9 is what Gazebo (Ionic/Harmonic)
-# reads, and every element written here has been in the format for far longer;
-# a reader of an older version accepts the file, since nothing below is new.
-SDF_VERSION = "1.9"
+# The SDFormat version PartCAD writes. 1.11 is the newest Gazebo Harmonic reads
+# (libsdformat 14), and the first in which a bound a joint does not state is no
+# bound at all: from 1.10 on an omitted '<lower>' or '<upper>' is -inf or +inf,
+# where before it was 1e16, which had to be written out to say "open". It also
+# writes a screw's thread as '<screw_thread_pitch>' (from 1.10) and a mimic as
+# '<mimic>' (from 1.11). A world read by this package may be any version.
+SDF_VERSION = "1.11"
 
 # Mesh formats a world may name, mapped to the PartCAD part type that reads
 # them. COLLADA (.dae) is deliberately absent for the reason it is absent from

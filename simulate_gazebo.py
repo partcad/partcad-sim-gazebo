@@ -50,11 +50,15 @@ a run which is not progressing at all.
 
 **Joints.** A world whose models have joints in them -- a hinge, a slide -- is
 also read for where each joint is and how fast it moves, as ``joints`` beside
-``bodies``, in the same vocabulary the MuJoCo plugin states them in: degrees
-for a turn, millimetres for a move, the terms of the ``motion:`` an interface
-declares. Gazebo publishes joint states only for a model that carries its
-JointStatePublisher system, so the world that runs is a copy of the one handed
-over with that system added; see 'plan_joints' and 'JointStream'.
+``bodies``, in the same vocabulary the MuJoCo plugin states them in: one entry
+per PartCAD joint, in PartCAD's terms -- degrees for a turn, millimetres for a
+move, counted from PartCAD's zero although the world counts every joint from
+its start -- made by PartCAD's own 'kinematics.reading' out of the joint map
+the exporter wrote into the sidecar. Gazebo publishes joint states only for a
+model that carries its JointStatePublisher system, so the world that runs is a
+copy of the one handed over with that system added; see 'plan_joints' and
+'JointStream'. A ball and a floating child are read from where their bodies
+are instead; see 'posed_states'.
 
 **Names are PartCAD's, and poses the world's.** A validation reads
 ``after["bodies"]["arm"]`` and ``after["joints"]["swing"]`` by the names PartCAD
@@ -497,12 +501,21 @@ def ended_how(returncode):
     return "exit status %s" % returncode
 
 
+# The kinds of joint 'kinematics.classify' finds that are read from the poses
+# of their bodies ('posed_states'): its BALL and its FLOATING, spelled out
+# rather than imported, for the reason MM_PER_M is.
+BALL = "ball"
+FLOATING = "floating"
+POSED = (BALL, FLOATING)
+
+
 class Names:
     """PartCAD's names for what a world calls its entities, out of the sidecar beside it.
 
     The sidecar is PartCAD's (see 'naming.read_sidecar' there): its 'bodies'
     say where each PartCAD body is -- the model's name and the link's -- its
-    'joints' the same of each reported joint, and its 'names' which name the
+    'joints' the same of each reported joint, with the joint's 'map' back into
+    PartCAD's terms ('kinematics.joint_map'), and its 'names' which name the
     scene and each body became. Anything it does not mention -- everything in a
     world with no sidecar -- is reported as it is.
     """
@@ -515,10 +528,24 @@ class Names:
             if isinstance(path, list) and path:
                 self.bodies[name] = tuple(str(part) for part in path)
         self.joints = {}
+        # (model, SDFormat joint) -> the joint's sidecar entry, where it carries
+        # a map: what 'kinematics.reading' makes PartCAD's reading of it from.
+        self.maps = {}
+        # Reported name -> the entry of every joint read from the poses of its
+        # bodies rather than from a joint state (see 'posed_states').
+        self.posed = {}
         for name, entry in (sidecar.get("joints") or {}).items():
-            path = entry.get("path") if isinstance(entry, dict) else None
+            if not isinstance(entry, dict):
+                continue
+            path = entry.get("path")
+            mapped = isinstance(entry.get("map"), dict)
             if isinstance(path, list) and len(path) >= 2:
-                self.joints[("::".join(str(part) for part in path[:-1]), str(path[-1]))] = name
+                key = ("::".join(str(part) for part in path[:-1]), str(path[-1]))
+                self.joints[key] = name
+                if mapped:
+                    self.maps[key] = entry
+            if mapped and entry["map"].get("kind") in POSED:
+                self.posed[name] = entry
         names = sidecar.get("names") or {}
         self.scenes = {str(internal): name for name, internal in (names.get("scene") or {}).items()}
         self.models = {str(internal): name for name, internal in (names.get("body") or {}).items()}
@@ -534,6 +561,24 @@ class Names:
 
     def world(self, internal):
         return self.scenes.get(internal, internal)
+
+    def posing(self):
+        """The models whose links' poses a run needs every step, by scoped name.
+
+        Each ball's, for its speed, and for each floating child its own model
+        and the model of the body it is read against, for the two bodies'
+        velocities: what 'kinematics.reading' reads a free body's rates from.
+        """
+        models = set()
+        for entry in self.posed.values():
+            if entry["map"].get("kind") == FLOATING:
+                for body in (entry.get("body"), entry["map"].get("parent")):
+                    path = self.bodies.get(body)
+                    if path:
+                        models.add("::".join(path[:-1]))
+            else:
+                models.add("::".join(str(part) for part in (entry.get("path") or [])[:-1]))
+        return models
 
     def model(self, scoped):
         return self.models.get(scoped, scoped)
@@ -1004,11 +1049,12 @@ def messages(stream):
 #
 # Gazebo states where a model's joints are only for a model that carries its
 # JointStatePublisher system, which publishes a 'gz.msgs.Model' every step: the
-# model, then one 'joint' per joint, each with an 'axis1' holding its 'position'
-# and 'velocity' in radians or metres. A world does not carry it -- PartCAD's
-# exporter writes none, and a world somebody else wrote has no reason to -- so
-# the world that runs is a copy of the one handed over, with the system added to
-# every model that has a joint to read.
+# model, then one 'joint' per joint, each with an 'axis1' (and an 'axis2', for a
+# joint of two) holding its 'position' and 'velocity' in radians or metres. A
+# world does not carry it -- PartCAD's exporter writes none, and a world
+# somebody else wrote has no reason to -- so the world that runs is a copy of
+# the one handed over, with the system added to every model that has a joint to
+# read.
 #
 # Added here rather than by the exporter, for three reasons. What a run needs to
 # read is the reader's business: a world written for `pc open --with gazebo`, or
@@ -1021,7 +1067,18 @@ def messages(stream):
 # loading defaults" with the publisher on every model.)
 #
 # What the messages do not say is a joint's type -- Harmonic's publisher leaves
-# it out -- so that is read out of the world too, while the copy is made.
+# it out -- so that is read out of the sidecar, or out of the world, while the
+# copy is made.
+#
+# Two kinds of joint are not read from joint states at all. A ball's are two of
+# its three coordinates -- the publisher writes 'axis1' and 'axis2' and DART's
+# 'BallJoint' has a third -- which is not an orientation; and the child of a
+# floating joint is no joint of the world, but a model of its own. Both are
+# read from where their bodies are, which every pose message says (see
+# 'posed_states'), and a ball's angular velocity from where its two links are
+# a step either side of the reading, which a PosePublisher system on its model
+# says every step (see 'LinkStream'): the pose messages come a sixtieth of a
+# second apart, which is too far apart to tell a speed by.
 #
 
 JOINT_STATE_PUBLISHER = {
@@ -1029,26 +1086,46 @@ JOINT_STATE_PUBLISHER = {
     "name": "gz::sim::systems::JointStatePublisher",
 }
 
-# The SDFormat joint types that are read, as the 'motion:' type PartCAD calls
-# them -- which is the same name for each of them, but for a 'revolute' nothing
-# limits ('motion_type'). A screw is read as its turn, which is the coordinate
-# Gazebo gives it; the move along its axis follows from the thread.
+# Every link's pose in its model, every step, as one 'gz.msgs.Pose_V' on
+# '/model/<model>/pose' -- a topic it names itself, after the model.
+POSE_PUBLISHER = {
+    "filename": "gz-sim-pose-publisher-system",
+    "name": "gz::sim::systems::PosePublisher",
+}
+POSE_PUBLISHER_SETTINGS = (
+    ("publish_link_pose", "true"),
+    ("publish_visual_pose", "false"),
+    ("publish_collision_pose", "false"),
+    ("publish_sensor_pose", "false"),
+    # The model's own pose in the world too, so that a link's world pose -- and
+    # its world velocity, a step either side -- can be had from one message.
+    ("publish_model_pose", "true"),
+    ("publish_nested_model_pose", "false"),
+    ("use_pose_vector_msg", "true"),
+    # Every step: nought or less is "as often as the world steps".
+    ("update_frequency", "-1"),
+)
+
+# The SDFormat joint types that are read in a world PartCAD did not write -- one
+# with no sidecar, and so no joint map -- and what each is called in PartCAD,
+# which is the same name for each of them but a 'continuous', which is a
+# 'revolute' bounded on neither side (PartCAD has no 'continuous', and the
+# MuJoCo plugin reports a hinge as a 'revolute' whatever its bounds). A screw is
+# read as its turn, which is the coordinate Gazebo gives it; the move along its
+# axis follows from the thread.
 TURNS = ("revolute", "continuous", "screw")
 MOVES = ("prismatic",)
+SDF_TYPES = {"continuous": "revolute"}
 
 # The joint types that are not, and why. Each such joint is named in the
 # result's 'warnings' instead: something may have moved there, and a reading
 # that quietly leaves it out is worse than one that says it did.
 NOT_READ = {
     "ball": "Gazebo publishes two of a ball joint's three coordinates, which is not an orientation",
-    "universal": "it turns about two axes, and PartCAD has no motion of that type",
+    "universal": "it turns about two axes, and a world PartCAD did not write does not say which turn each is",
     "revolute2": "it turns about two axes, and PartCAD has no motion of that type",
     "gearbox": "PartCAD has no motion of that type",
 }
-
-# SDFormat's own default for a joint limit nobody stated, and so what "no
-# limit" looks like once a world has been through a tool that writes them out.
-NO_LIMIT = 1e16
 
 # How long to wait, in wall-clock seconds, for a model's joint states to reach
 # the instant a pose message was taken at. Both come out of the same step of the
@@ -1067,37 +1144,21 @@ def note(warnings, message):
 class JointModel:
     """One model whose joints are read: what it is called, where they arrive, what they are."""
 
-    def __init__(self, scoped, topic, joints, shown=None):
+    def __init__(self, scoped, topic, joints, shown=None, maps=None, links=False):
         # 'outer::inner' for a nested model, which is how Gazebo scopes one.
         self.scoped = scoped
         # What a warning calls it: PartCAD's name for it, where there is one.
         self.shown = shown or scoped
         # The topic its publisher was told to publish on.
         self.topic = topic
-        # {name in the world: (motion type, name reported under, SDFormat type)}
+        # {name in the world: (type, name reported under, SDFormat type)}
         self.joints = joints
-
-
-def motion_type(joint, declared):
-    """The 'motion:' type of one SDFormat joint of a type that is read.
-
-    Its own type, except that a 'revolute' is one only while something limits
-    it: without a limit it is 'continuous', which is the line PartCAD (and
-    URDF) draws, and the one the MuJoCo plugin reads a hinge by. So a validation
-    reads the same type out of either engine for the same joint, however each
-    file had to spell it -- which matters, because Gazebo cannot run one of the
-    two spellings (see 'joint_states').
-    """
-    if declared != "revolute":
-        return declared
-    for bound in ("axis/limit/lower", "axis/limit/upper"):
-        text = joint.findtext(bound)
-        try:
-            if text is not None and abs(float(text)) < NO_LIMIT:
-                return "revolute"
-        except ValueError:
-            continue
-    return "continuous"
+        # {name in the world: its sidecar entry}, for each joint that has a
+        # map back into PartCAD's terms ('kinematics.joint_map').
+        self.maps = maps or {}
+        # Whether what arrives on 'topic' is its links' poses (a PosePublisher's,
+        # for its balls) rather than its joints' states.
+        self.links = links
 
 
 def plan_joints(world, prefix, warnings, names=AS_WRITTEN):
@@ -1109,32 +1170,44 @@ def plan_joints(world, prefix, warnings, names=AS_WRITTEN):
     topic of a nested model. Two runs on one machine use the same topics and
     are kept apart by their partitions (see 'run_environment').
 
+    A joint the sidecar ('names') has a map for is read as the map says,
+    under PartCAD's name for it -- but a ball, which is read from its links'
+    poses. A model whose links' poses a run needs every step ('Names.posing':
+    a ball's, for its speed; a floating child's and the model it is read
+    against, for their velocities) gets a PosePublisher, and a 'JointModel'
+    with 'links' set. A joint with no map is
+    reported under its own name where no other joint read has it, and as
+    '<model>::<joint>' where one does -- for every one of them, so that
+    neither is the joint the plain name means. Names are only unique within a
+    model, and a world with two of the same robot in it has two of every joint.
+
     A fixed joint is not read: nothing moves there. Nor is a joint of a static
     model, or of a model nested in one: the world says nothing of it moves, so
     there is nothing to say. A joint of a type that is not read is named in
     'warnings'.
-
-    A joint is reported under PartCAD's name for it where the sidecar
-    ('names') says one. Otherwise under its own name where no other joint read
-    has it, and as '<model>::<joint>' where one does -- for every one of them,
-    so that neither is the joint the plain name means. Names are only unique
-    within a model, and a world with two of the same robot in it has two of
-    every joint.
     """
     found = []
+    posing = []
+    wanted = names.posing()
 
     def visit(model, scope, static):
         scoped = scope + [model.get("name") or "model"]
         static = static or (model.findtext("static") or "").strip().lower() in ("true", "1")
         if not static:
-            read = {}
+            read, maps = {}, {}
             for joint in model.findall("joint"):
                 name = joint.get("name")
                 declared = (joint.get("type") or "").strip().lower()
                 if not name or declared == "fixed":
                     continue
-                if declared in TURNS or declared in MOVES:
-                    read[name] = (motion_type(joint, declared), declared)
+                entry = names.maps.get(("::".join(scoped), name))
+                if entry is not None:
+                    kind = entry["map"].get("kind")
+                    if kind not in POSED:
+                        read[name] = (kind, declared)
+                        maps[name] = entry
+                elif declared in TURNS or declared in MOVES:
+                    read[name] = (SDF_TYPES.get(declared, declared), declared)
                 else:
                     note(
                         warnings,
@@ -1147,16 +1220,18 @@ def plan_joints(world, prefix, warnings, names=AS_WRITTEN):
                         ),
                     )
             if read:
-                found.append((model, "::".join(scoped), read))
+                found.append((model, "::".join(scoped), read, maps))
+            if "::".join(scoped) in wanted:
+                posing.append((model, scoped))
         for nested in model.findall("model"):
             visit(nested, scoped, static)
 
     for model in world.findall("model"):
         visit(model, [], False)
 
-    counts = collections.Counter(name for _model, _scoped, read in found for name in read)
+    counts = collections.Counter(name for _model, _scoped, read, _maps in found for name in read)
     models = []
-    for index, (element, scoped, read) in enumerate(found):
+    for index, (element, scoped, read, maps) in enumerate(found):
         topic = "%s/%d" % (prefix, index)
         plugin = ElementTree.SubElement(element, "plugin", dict(JOINT_STATE_PUBLISHER))
         ElementTree.SubElement(plugin, "topic").text = topic
@@ -1168,7 +1243,14 @@ def plan_joints(world, prefix, warnings, names=AS_WRITTEN):
             )
             for name, (kind, declared) in read.items()
         }
-        models.append(JointModel(scoped, topic, joints, names.model(scoped)))
+        models.append(JointModel(scoped, topic, joints, names.model(scoped), maps))
+    for element, scoped in posing:
+        plugin = ElementTree.SubElement(element, "plugin", dict(POSE_PUBLISHER))
+        for key, value in POSE_PUBLISHER_SETTINGS:
+            ElementTree.SubElement(plugin, key).text = value
+        # The topic Harmonic's PosePublisher names after the model it is on.
+        topic = "/model/%s/pose" % "/".join(scoped)
+        models.append(JointModel("::".join(scoped), topic, {}, names.model("::".join(scoped)), links=True))
     return models
 
 
@@ -1232,19 +1314,39 @@ _NANOSECONDS = re.compile(r"\bnsec: (\d+)")
 
 
 def message_time(text):
-    """The simulated time a message was published at, read off its header alone.
+    """The simulated time a message was published at, read off its first header alone.
 
     A joint-state message arrives every step and nearly all of them are never
     read, so only the header of each is: the rest is parsed if a reading asks
     for that one. The same sum 'snapshot' makes of the same two fields, so that
-    the two clocks compare equal at the same instant.
+    the two clocks compare equal at the same instant. The first header is the
+    message's own in a joint-state message, and its first pose's in a
+    PosePublisher's, where every pose carries the step's.
     """
-    match = _STAMP.match(text)
+    match = _STAMP.search(text)
     if match is None:
         return 0.0
     seconds = _SECONDS.search(match.group(1))
     nanoseconds = _NANOSECONDS.search(match.group(1))
     return float(seconds.group(1) if seconds else 0) + float(nanoseconds.group(1) if nanoseconds else 0) / 1e9
+
+
+def separated(stream):
+    """Every message on a 'gz topic -e' stream that prints a blank line after each.
+
+    What a PosePublisher's 'Pose_V' needs, where 'messages' would find no
+    message at all: it has no header of its own, only one in each pose.
+    """
+    current = []
+    for line in stream:
+        if not line.strip():
+            if current:
+                yield "".join(current)
+                current = []
+            continue
+        current.append(line)
+    if current:
+        yield "".join(current)
 
 
 class JointStream:
@@ -1266,10 +1368,13 @@ class JointStream:
         self.silent = False
         self.condition = threading.Condition()
 
+    def split(self, stream):
+        return messages(stream)
+
     def follow(self, stream):
         """Keep every message 'stream' carries, until it ends."""
         try:
-            for text in messages(stream):
+            for text in self.split(stream):
                 stamp = message_time(text)
                 with self.condition:
                     self.entries.append((stamp, text))
@@ -1282,6 +1387,16 @@ class JointStream:
             with self.condition:
                 self.ended = True
                 self.condition.notify_all()
+
+    def _wait(self, reached, patience):
+        """Wait, holding the condition, until 'reached()', the stream ends, or 'patience' runs out."""
+        deadline = time.monotonic() + patience
+        while not self.ended and not self.silent and not reached():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.silent = self.newest is None
+                break
+            self.condition.wait(remaining)
 
     def at(self, moment, patience=PATIENCE):
         """The message taken at 'moment', as text, or None if there is none at all.
@@ -1296,13 +1411,7 @@ class JointStream:
         stream that only started after it -- the first one there is.
         """
         with self.condition:
-            deadline = time.monotonic() + patience
-            while not self.ended and not self.silent and (self.newest is None or self.newest < moment):
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    self.silent = self.newest is None
-                    break
-                self.condition.wait(remaining)
+            self._wait(lambda: self.newest is not None and self.newest >= moment, patience)
             chosen = None
             for stamp, text in self.entries:
                 if stamp > moment:
@@ -1323,18 +1432,68 @@ class JointStream:
                 self.entries.popleft()
 
 
+class LinkStream(JointStream):
+    """The poses of one model's links, every step, as its PosePublisher prints them: what speeds are read from.
+
+    A pose message comes every sixtieth of a second, and a ball's rotation and
+    a free body's pose at a reading's instant are read from it exactly (see
+    'posed_states'); a speed is not in it, and a difference over a sixtieth of
+    a second is percents off for anything that swings. So the model publishes
+    its links every step as well, and a speed is what the last step before the
+    reading moved a body by, over the step ('last_step'): Gazebo's DART steps
+    by semi-implicit Euler, which moves a body by the speed it ends the step
+    with, so that is the speed the engine holds at the reading -- the one its
+    joint states report for every other joint -- and not the speed half a step
+    on that a difference across the reading would be.
+    """
+
+    def split(self, stream):
+        return separated(stream)
+
+    def last_step(self, moment, patience=PATIENCE):
+        """The message of 'moment' and the one before it, as '(stamp, text)' pairs, or None.
+
+        Where the stream has no message of that very step, or none before it,
+        the two nearest it -- one each side where there are -- which is a
+        speed a step away at worst.
+        """
+        with self.condition:
+            self._wait(lambda: self.newest is not None and self.newest >= moment, patience)
+            earlier = [(stamp, text) for stamp, text in self.entries if stamp < moment]
+            at = [(stamp, text) for stamp, text in self.entries if stamp == moment]
+            later = [(stamp, text) for stamp, text in self.entries if stamp > moment]
+            if at and earlier:
+                return earlier[-1], at[0]
+            first = earlier[-1] if earlier else (at[0] if at else None)
+            second = at[0] if at and earlier else (later[0] if later else None)
+            if first is None or second is None:
+                return None
+            return first, second
+
+    def forget_before(self, moment):
+        """Drop every message older than the latest one taken before 'moment', which 'last_step' may still want."""
+        with self.condition:
+            while len(self.entries) > 1 and self.entries[1][0] < moment:
+                self.entries.popleft()
+
+
 def joint_states(message, model, warnings):
     """The joints of one model in one of its joint-state messages, in PartCAD's terms.
 
-    The terms of the 'motion:' an interface declares, and the same vocabulary
-    the MuJoCo plugin reports in:
+    A joint with a map ('model.maps') is read through it by PartCAD's own
+    'kinematics.reading': under the PartCAD joint's name, in PartCAD's units,
+    from PartCAD's zero rather than the world's -- the export re-zeroed every
+    joint at its start -- and as a number for a joint of one freedom and an
+    object keyed by parameter for one of several (a screw's turn and the move
+    that follows it, a universal joint's two turns). One without -- a world
+    PartCAD did not write -- in the terms of the 'motion:' an interface
+    declares, which is the vocabulary the MuJoCo plugin reports in too:
 
-      revolute, continuous, screw  'pos' in degrees, 'vel' in degrees per second
-      prismatic                    'pos' in millimetres, 'vel' in mm/s
+      revolute (and continuous), screw  'pos' in degrees, 'vel' in degrees per second
+      prismatic                         'pos' in millimetres, 'vel' in mm/s
 
-    'pos' is the joint's own coordinate, zero where the world placed the child
-    link: a pendulum written out horizontal reads 0 there and 90, one way or
-    the other, hanging down.
+    and 'pos' is then the joint's own coordinate, zero where the world placed
+    the child link.
 
     There is no 'effort', which the MuJoCo plugin does report. The message has a
     field for it and Harmonic leaves it empty -- it stays empty while a force is
@@ -1372,7 +1531,11 @@ def joint_states(message, model, warnings):
                 ),
             )
             continue
-        scale = DEG_PER_RAD if kind in TURNS else MM_PER_M
+        entry = model.maps.get(name)
+        if entry is not None:
+            states[reported] = mapped_state(entry, joint)
+            continue
+        scale = DEG_PER_RAD if declared in TURNS else MM_PER_M
         states[reported] = {
             "type": kind,
             "pos": float(axis.get("position") or 0.0) * scale,
@@ -1388,14 +1551,215 @@ def joint_states(message, model, warnings):
     return states
 
 
-def fill(reading, streams, warnings, patience=PATIENCE):
+def mapped_state(entry, joint):
+    """One joint of a joint-state message, read through its joint map: 'kinematics.reading' of its coordinates.
+
+    One coordinate per axis the map says the joint has -- 'axis1', and
+    'axis2' for a universal joint -- in radians or metres as Gazebo states
+    them, and nought where the message leaves a field out, as protobuf's text
+    format does with every field at its default.
+    """
+    import kinematics
+
+    count = max(1, len(entry["map"].get("coordinates") or []))
+    axes = [joint.get(tag) if isinstance(joint.get(tag), dict) else {} for tag in ("axis1", "axis2")[:count]]
+    positions = [float(axis.get("position") or 0.0) for axis in axes]
+    velocities = [float(axis.get("velocity") or 0.0) for axis in axes]
+    return kinematics.reading([entry], [positions], [velocities])
+
+
+def _pose_data(data):
+    """A pose the sidecar states as '[[w, x, y, z], [x, y, z]]' as a '(q, t)' pose."""
+    return tuple(float(v) for v in data[0]), tuple(float(v) for v in data[1])
+
+
+def _conjugate(q):
+    return (q[0], -q[1], -q[2], -q[3])
+
+
+def ball_rotation(ball, parent, child):
+    """A ball's rotation as Gazebo turned it, from where its two links are.
+
+    'ball' is what the exporter recorded beside the ball's map: the joint's
+    frame in each of its two links, which are one frame where the ball starts,
+    Gazebo's zero of it. The rotation is the child's against the parent's --
+    in the ball's own frame, which is the frame its map ('frame') says the
+    engine's rotation is stated in. 'parent' and 'child' are the links' poses
+    in any one frame.
+    """
+    import urdf_common
+
+    on_parent = urdf_common.compose(parent, _pose_data(ball["in_parent"]))
+    on_child = urdf_common.compose(child, _pose_data(ball["in_child"]))
+    return urdf_common.normalize(urdf_common.quat_mul(_conjugate(on_parent[0]), on_child[0]))
+
+
+def ball_rate(ball, paths, pair):
+    """A ball's angular velocity at a reading, in rad/s about its own moving frame, or None.
+
+    'pair' is the PosePublisher's messages of the step before the reading and
+    of the reading's own ('LinkStream.last_step'), and 'paths' the model and
+    link of the ball's two bodies (the sidecar's 'bodies'), which is what the
+    publisher names a link by: '<model>::<link>'. The rate is the turn between
+    the two rotations over the step -- what DART turned it by, at the speed it
+    holds at the reading -- about the frame the first one leaves, which is how
+    'kinematics.reading' takes it.
+    """
+    import urdf_common
+
+    rotations = []
+    for stamp, text in pair:
+        poses = unique_poses(parse_message(text))
+        names = ["::".join(paths.get(ball[side]) or ()) for side in ("parent", "child")]
+        if not all(name in poses for name in names):
+            return None
+        rotations.append((stamp, ball_rotation(ball, poses[names[0]], poses[names[1]])))
+    (first, earlier), (second, later) = rotations
+    turn = _rotation_vector(urdf_common.quat_mul(_conjugate(earlier), later))
+    return [v / (second - first) for v in turn]
+
+
+def _rotation_vector(q):
+    """The rotation 'q' as its axis times its angle, in radians: the smaller way round."""
+    if q[0] < 0.0:
+        q = tuple(-v for v in q)
+    along = math.sqrt(sum(v * v for v in q[1:]))
+    if along < 1e-15:
+        return [0.0, 0.0, 0.0]
+    angle = 2.0 * math.atan2(along, q[0])
+    return [v / along * angle for v in q[1:]]
+
+
+def _in_world(poses, path):
+    """A link's pose in the world out of one PosePublisher message: its model's, and its own in the model."""
+    import urdf_common
+
+    model, link = path[0], "::".join(path)
+    if model not in poses or link not in poses:
+        return None
+    return urdf_common.compose(poses[model], poses[link])
+
+
+def free_body_twists(entry, paths, links, moment, patience=PATIENCE):
+    """A floating child's world velocity and its parent's, at 'moment', as 'kinematics.reading' takes them, or None.
+
+    '(child twist, parent twist)', each '((vx, vy, vz), (wx, wy, wz))': the
+    linear velocity of the body's frame origin in m/s and its angular velocity
+    in rad/s, both in the world's axes. Gazebo publishes neither -- a link's
+    world velocity is a component of the server's, which no topic carries --
+    so each is what the last step moved the body by, out of the PosePublisher
+    on its model ('LinkStream.last_step'), over the step: DART's semi-implicit
+    Euler moves a body by the speed it ends a step with, so that is the speed
+    the engine holds at the reading.
+    """
+    import urdf_common
+
+    twists = []
+    for body in (entry.get("body"), entry["map"].get("parent")):
+        path = paths.get(body)
+        stream = links.get("::".join(path[:-1])) if path else None
+        pair = stream.last_step(moment, patience) if stream is not None else None
+        if pair is None:
+            return None
+        poses = [(stamp, _in_world(unique_poses(parse_message(text)), path)) for stamp, text in pair]
+        if any(pose is None for _stamp, pose in poses):
+            return None
+        (first, earlier), (second, later) = poses
+        span = second - first
+        linear = tuple((b - a) / span / MM_PER_M for a, b in zip(earlier[1], later[1]))
+        angular = tuple(v / span for v in _rotation_vector(urdf_common.quat_mul(later[0], _conjugate(earlier[0]))))
+        twists.append((linear, angular))
+    return tuple(twists)
+
+
+def _pose_of(body):
+    """A body of a reading as a '(q, t)' pose, in millimetres."""
+    return tuple(body["quat"]), tuple(body["pos"])
+
+
+def _metres(body):
+    """A body of a reading as a '(q, t)' pose in metres, which is how 'kinematics.reading' takes a free body's."""
+    return tuple(body["quat"]), tuple(v / MM_PER_M for v in body["pos"])
+
+
+def posed_states(reading, names, links, warnings, patience=PATIENCE):
+    """Every ball and every floating child at a reading's instant, read from where their bodies are.
+
+    A floating joint's child is a model of its own, and its reading is its
+    pose against the body it was connected to, which is what its map says to
+    read it against ('kinematics.reading' of the two), and its rates the two
+    bodies' world velocities ('free_body_twists'). A ball's rotation is its
+    two links' turned against each other ('ball_rotation'), and its angular
+    velocity is read from its model's PosePublisher over the last step
+    ('ball_rate'). A ball or a floating child whose speed cannot be read is
+    reported without its 'vel', and says so.
+    """
+    if not names.posed:
+        return
+    import kinematics
+
+    bodies = reading["bodies"]
+    for name, entry in names.posed.items():
+        joint_map = entry["map"]
+        if joint_map.get("kind") == FLOATING:
+            child, parent = bodies.get(entry.get("body")), bodies.get(joint_map.get("parent"))
+            if child is None or parent is None:
+                note(
+                    warnings,
+                    "joint '%s' is not reported: the body it is read against, '%s', is not in the reading"
+                    % (name, joint_map.get("parent") if parent is None else entry.get("body")),
+                )
+                continue
+            twists = free_body_twists(entry, names.bodies, links, reading["time"], patience)
+            if twists is None:
+                note(
+                    warnings,
+                    "the floating joint '%s' is reported without its 'vel': Gazebo published no poses of its two "
+                    "bodies either side of a reading to tell their speeds by" % name,
+                )
+            reading["joints"][name] = kinematics.reading(
+                [entry], [(_metres(child), _metres(parent))], None if twists is None else [twists]
+            )
+            continue
+        ball = entry.get("ball") or {}
+        parent, child = bodies.get(ball.get("parent")), bodies.get(ball.get("child"))
+        if child is None or parent is None:
+            note(warnings, "the ball '%s' is not reported: its two bodies are not both in the reading" % name)
+            continue
+        rotation = ball_rotation(ball, _pose_of(parent), _pose_of(child))
+        path = entry.get("path") or []
+        stream = links.get("::".join(str(part) for part in path[:-1]))
+        pair = stream.last_step(reading["time"], patience) if stream is not None else None
+        rate = ball_rate(ball, names.bodies, pair) if pair is not None else None
+        if rate is None:
+            note(
+                warnings,
+                "the ball '%s' is reported without its 'vel': Gazebo published no poses of its links either side "
+                "of a reading to tell its speed by" % name,
+            )
+        reading["joints"][name] = kinematics.reading([entry], [rotation], None if rate is None else [rate])
+
+
+def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
     """State in 'reading' where the joints of every stream were at its instant.
 
     'patience' is how long to wait for a stream that has not got that far yet
     (see 'JointStream.at'); nothing is worth waiting for once the server that
-    publishes them has gone.
+    publishes them has gone. A ball and a floating child are read from the
+    reading's own bodies, and their speeds from their models' link streams
+    ('posed_states').
+
+    Returns whether every stream had a state of the reading's own instant or
+    an earlier one to give: False where one began after it -- its subscriber
+    came up a step or two after the server's first -- and gave a later
+    step's, which puts those joints a step from where the bodies are.
     """
+    links = {}
+    in_step = True
     for stream in streams:
+        if stream.model.links:
+            links[stream.model.scoped] = stream
+            continue
         text = stream.at(reading["time"], patience)
         if text is None:
             note(
@@ -1404,7 +1768,10 @@ def fill(reading, streams, warnings, patience=PATIENCE):
                 % stream.model.shown,
             )
             continue
+        in_step = in_step and message_time(text) <= reading["time"]
         reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
+    posed_states(reading, names, links, warnings, patience)
+    return in_step
 
 
 def process(path, request):
@@ -1466,8 +1833,9 @@ def process(path, request):
         run_file, joint_models = prepare_world(scene_file, warnings, names)
         command.append(run_file)
 
-        # A subscriber for the joints of each model that has any, listening
-        # before the server starts for the reason the one above is.
+        # A subscriber for the joints of each model that has any -- and for
+        # the links of each that has a ball, whose speed is read from them --
+        # listening before the server starts for the reason the one above is.
         for model in joint_models:
             joint_watcher = programs.start(
                 [server, topic_command, "-e", "-t", model.topic],
@@ -1477,7 +1845,7 @@ def process(path, request):
                 bufsize=1,
                 env=run_env,
             )
-            streams.append(JointStream(model))
+            streams.append((LinkStream if model.links else JointStream)(model))
             threading.Thread(target=streams[-1].follow, args=(joint_watcher.stdout,), daemon=True).start()
 
         simulator = programs.start(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=run_env)
@@ -1566,15 +1934,20 @@ def process(path, request):
                 unread += 1
                 continue
             if before is None:
+                if not fill(reading, streams, warnings, patience(), names):
+                    # A joint stream that began after this instant has only a
+                    # later step to give, so the joints would be a step from
+                    # where the bodies are: 'before' is the first instant
+                    # every stream has reached, which the next message is.
+                    continue
                 before = reading
                 first = message
-                fill(before, streams, warnings, patience())
             after = reading
             last = message
             for stream in streams:
                 stream.forget_before(reading["time"])
             if next_sample is not None and reading["time"] >= next_sample:
-                fill(reading, streams, warnings, patience())
+                fill(reading, streams, warnings, patience(), names)
                 trace.append(reading)
                 next_sample += every
             if reading["time"] >= duration:
@@ -1585,7 +1958,7 @@ def process(path, request):
         # after it, because the server is still up and still publishing, and
         # the joint states of that instant may still be on their way. Unless it
         # is not, in which case what has arrived is all there will be.
-        fill(after, streams, warnings, patience())
+        fill(after, streams, warnings, patience(), names)
     finally:
         programs.stop()
         if run_file != scene_file:
@@ -1644,4 +2017,9 @@ if __name__ == "__main__":  # pragma: no cover
     # this machine's Gazebo behaves the way the code above expects.
     import json
 
-    print(json.dumps(process(None, {"scene_file": sys.argv[1], "duration": float(sys.argv[2] if len(sys.argv) > 2 else 10)}), indent=2))
+    print(
+        json.dumps(
+            process(None, {"scene_file": sys.argv[1], "duration": float(sys.argv[2] if len(sys.argv) > 2 else 10)}),
+            indent=2,
+        )
+    )
