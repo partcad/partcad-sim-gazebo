@@ -36,9 +36,8 @@ desc: Reading, writing, opening and simulating a Gazebo world, in SDFormat.
 # rather than its container's (partcad/partcad#788): without it, a part bolted
 # to a pendulum's arm would be written onto its frame and not swing.
 #
-# TODO: the release #788 ships in. Every merge to PartCAD's 'devel' is a
-# release, so this is a placeholder until it has merged.
-partcad: ">=0.8.201"
+# partcad/partcad#788 shipped in 0.8.202.
+partcad: ">=0.8.202"
 
 docs:
   intro: |

@@ -241,7 +241,7 @@ def sdf_poses(model, coordinates=None):
             return world[name]
         parent = joint.findtext("parent")
         at_zero = urdf_common.compose(placed[name], _pose(joint))
-        in_parent = urdf_common.compose(urdf_common.inverse(placed[parent]), at_zero)
+        in_parent = urdf_common.compose(kinematics.inverse(placed[parent]), at_zero)
         value = coordinates.get(joint.get("name"))
         motion = kinematics.IDENTITY
         if value is not None:
@@ -251,7 +251,7 @@ def sdf_poses(model, coordinates=None):
                 if xyz is None:
                     continue
                 vector = _numbers(xyz.text)
-                expressed = urdf_common.compose(urdf_common.inverse(at_zero), frame_of(xyz.get("expressed_in")))
+                expressed = urdf_common.compose(kinematics.inverse(at_zero), frame_of(xyz.get("expressed_in")))
                 axes.append(kinematics.rotate(expressed, vector))
             kind = joint.get("type")
             if kind == "revolute":
@@ -273,7 +273,7 @@ def sdf_poses(model, coordinates=None):
                 )
             elif kind == "ball":
                 motion = (tuple(value), (0.0, 0.0, 0.0))
-        moved = urdf_common.compose(urdf_common.compose(in_parent, motion), urdf_common.inverse(_pose(joint)))
+        moved = urdf_common.compose(urdf_common.compose(in_parent, motion), kinematics.inverse(_pose(joint)))
         world[name] = urdf_common.compose(resolve(parent), moved)
         return world[name]
 
