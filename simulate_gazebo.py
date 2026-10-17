@@ -56,6 +56,20 @@ declares. Gazebo publishes joint states only for a model that carries its
 JointStatePublisher system, so the world that runs is a copy of the one handed
 over with that system added; see 'plan_joints' and 'JointStream'.
 
+**Names are PartCAD's, and poses the world's.** A validation reads
+``after["bodies"]["arm"]`` and ``after["joints"]["swing"]`` by the names PartCAD
+gave them, and a world cannot hold every one of those as it is: SDFormat
+reserves 'world', which is what PartCAD's default world is called. The exporter
+says which name each became, and which model and link each body is, in a
+sidecar beside the world (PartCAD's 'wrappers/naming.py'), and everything here
+is reported under the PartCAD name it reads there -- bodies, joints, the world
+and the warnings; see 'Names'. Each body's pose is its link's in the *world's*
+frame -- its model's pose composed with its link's, which is how Gazebo
+publishes them -- so that a link hanging off a mechanism's root reads where it
+is, as the MuJoCo plugin reads it, and not where it is in its model. A world
+with no sidecar, which PartCAD did not write, is reported as Gazebo publishes
+it: every entity under its own name, relative to its parent.
+
 **A partition of its own.** Every run talks to its server in a Gazebo transport
 partition nobody else is in, so that two runs on one machine -- two worlds of
 the same name, which is every pair of runs of one simulation -- do not read
@@ -483,6 +497,56 @@ def ended_how(returncode):
     return "exit status %s" % returncode
 
 
+class Names:
+    """PartCAD's names for what a world calls its entities, out of the sidecar beside it.
+
+    The sidecar is PartCAD's (see 'naming.read_sidecar' there): its 'bodies'
+    say where each PartCAD body is -- the model's name and the link's -- its
+    'joints' the same of each reported joint, and its 'names' which name the
+    scene and each body became. Anything it does not mention -- everything in a
+    world with no sidecar -- is reported as it is.
+    """
+
+    def __init__(self, sidecar=None):
+        sidecar = sidecar or {}
+        self.bodies = {}
+        for name, entry in (sidecar.get("bodies") or {}).items():
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, list) and path:
+                self.bodies[name] = tuple(str(part) for part in path)
+        self.joints = {}
+        for name, entry in (sidecar.get("joints") or {}).items():
+            path = entry.get("path") if isinstance(entry, dict) else None
+            if isinstance(path, list) and len(path) >= 2:
+                self.joints[("::".join(str(part) for part in path[:-1]), str(path[-1]))] = name
+        names = sidecar.get("names") or {}
+        self.scenes = {str(internal): name for name, internal in (names.get("scene") or {}).items()}
+        self.models = {str(internal): name for name, internal in (names.get("body") or {}).items()}
+
+    @classmethod
+    def beside(cls, scene_file):
+        try:
+            import naming
+        except ImportError:
+            # A PartCAD from before names were transcoded, which wrote none.
+            return cls()
+        return cls(naming.read_sidecar(scene_file))
+
+    def world(self, internal):
+        return self.scenes.get(internal, internal)
+
+    def model(self, scoped):
+        return self.models.get(scoped, scoped)
+
+    def joint(self, scoped, name):
+        """PartCAD's name for joint 'name' of the model 'scoped', or None where the sidecar does not say."""
+        return self.joints.get((scoped, name))
+
+
+# Every name as the world has it: a world with no sidecar.
+AS_WRITTEN = Names()
+
+
 def progress(world, before, after, count, duration):
     """What had been received when a run failed, for the message it fails with."""
     if before is None:
@@ -646,13 +710,18 @@ def _as_list(value):
     return value if isinstance(value, list) else [value]
 
 
-def snapshot(message):
-    """Where every entity is in one pose message, keyed by the name Gazebo gave it.
+def snapshot(message, names=AS_WRITTEN):
+    """Where every body is in one pose message, keyed by PartCAD's name for it.
 
-    The world itself is left out: it is the frame everything else is stated in
-    and it never moves. What is left is the models PartCAD's exporter wrote out
-    of the scene, under the names it gave them - which is what makes a
-    validation expression readable.
+    With a sidecar ('names'), exactly the bodies PartCAD's exporter wrote, each
+    at its link's pose in the world's frame: the poses along its path -- its
+    model's, relative to the world, and its link's, relative to the model --
+    composed. A body whose model or link the message does not name once is left
+    out of that reading rather than placed at a guess.
+
+    Without one, every entity, keyed by the name Gazebo gave it, relative to
+    its parent as Gazebo publishes it; the world itself is left out: it is the
+    frame everything else is stated in and it never moves.
 
     An entity Gazebo reports with no name at all is kept under its id rather
     than dropped: something moved, and a reading that quietly omits it is worse
@@ -665,6 +734,9 @@ def snapshot(message):
     """
     stamp = (message.get("header") or {}).get("stamp") or {}
     seconds = float(stamp.get("sec") or 0) + float(stamp.get("nsec") or 0) / 1e9
+
+    if names.bodies:
+        return {"time": seconds, "bodies": world_poses(message, names), "joints": {}}
 
     bodies = {}
     for pose in _as_list(message.get("pose")):
@@ -683,6 +755,23 @@ def snapshot(message):
             "quat": [float(orientation.get(axis) or 0.0) for axis in ("w", "x", "y", "z")],
         }
     return {"time": seconds, "bodies": bodies, "joints": {}}
+
+
+def world_poses(message, names):
+    """Each PartCAD body of 'names' at its link's pose in the world, from one pose message."""
+    import urdf_common
+
+    poses = unique_poses(message)
+    bodies = {}
+    for name, path in names.bodies.items():
+        if not all(part in poses for part in path):
+            continue
+        frame = poses[path[0]]
+        for part in path[1:]:
+            frame = urdf_common.compose(frame, poses[part])
+        quat, pos = frame
+        bodies[name] = {"pos": [float(v) for v in pos], "quat": [float(v) for v in quat]}
+    return bodies
 
 
 def unique_poses(message):
@@ -978,9 +1067,11 @@ def note(warnings, message):
 class JointModel:
     """One model whose joints are read: what it is called, where they arrive, what they are."""
 
-    def __init__(self, scoped, topic, joints):
+    def __init__(self, scoped, topic, joints, shown=None):
         # 'outer::inner' for a nested model, which is how Gazebo scopes one.
         self.scoped = scoped
+        # What a warning calls it: PartCAD's name for it, where there is one.
+        self.shown = shown or scoped
         # The topic its publisher was told to publish on.
         self.topic = topic
         # {name in the world: (motion type, name reported under, SDFormat type)}
@@ -1009,7 +1100,7 @@ def motion_type(joint, declared):
     return "continuous"
 
 
-def plan_joints(world, prefix, warnings):
+def plan_joints(world, prefix, warnings, names=AS_WRITTEN):
     """Add a JointStatePublisher to every model of 'world' that has a joint to read.
 
     Returns a 'JointModel' for each, in document order, the publisher of the
@@ -1023,10 +1114,12 @@ def plan_joints(world, prefix, warnings):
     there is nothing to say. A joint of a type that is not read is named in
     'warnings'.
 
-    A joint is reported under its own name where no other joint read has it,
-    and as '<model>::<joint>' where one does -- for every one of them, so that
-    neither is the joint the plain name means. Names are only unique within a
-    model, and a world with two of the same robot in it has two of every joint.
+    A joint is reported under PartCAD's name for it where the sidecar
+    ('names') says one. Otherwise under its own name where no other joint read
+    has it, and as '<model>::<joint>' where one does -- for every one of them,
+    so that neither is the joint the plain name means. Names are only unique
+    within a model, and a world with two of the same robot in it has two of
+    every joint.
     """
     found = []
 
@@ -1047,8 +1140,8 @@ def plan_joints(world, prefix, warnings):
                         warnings,
                         "joint '%s' of model '%s' is not reported: it is a '%s' joint, and %s"
                         % (
-                            name,
-                            "::".join(scoped),
+                            names.joint("::".join(scoped), name) or name,
+                            names.model("::".join(scoped)),
                             declared,
                             NOT_READ.get(declared, "this plugin does not know the type"),
                         ),
@@ -1068,14 +1161,18 @@ def plan_joints(world, prefix, warnings):
         plugin = ElementTree.SubElement(element, "plugin", dict(JOINT_STATE_PUBLISHER))
         ElementTree.SubElement(plugin, "topic").text = topic
         joints = {
-            name: (kind, name if counts[name] == 1 else "%s::%s" % (scoped, name), declared)
+            name: (
+                kind,
+                names.joint(scoped, name) or (name if counts[name] == 1 else "%s::%s" % (scoped, name)),
+                declared,
+            )
             for name, (kind, declared) in read.items()
         }
-        models.append(JointModel(scoped, topic, joints))
+        models.append(JointModel(scoped, topic, joints, names.model(scoped)))
     return models
 
 
-def prepare_world(scene_file, warnings):
+def prepare_world(scene_file, warnings, names=AS_WRITTEN):
     """The world to run, and the models whose joints are read in it.
 
     The world as it was handed over when nothing in it has a joint to read -- so
@@ -1103,7 +1200,7 @@ def prepare_world(scene_file, warnings):
     world = root if root.tag == "world" else root.find("world")
     if world is None:
         return scene_file, []
-    models = plan_joints(world, "/partcad/joint_state", warnings)
+    models = plan_joints(world, "/partcad/joint_state", warnings, names)
     if not models:
         return scene_file, []
     stem, extension = os.path.splitext(os.path.basename(scene_file))
@@ -1264,8 +1361,8 @@ def joint_states(message, model, warnings):
                 warnings,
                 "joint '%s' of model '%s' is not reported: Gazebo ran it with no freedom to move%s"
                 % (
-                    name,
-                    model.scoped,
+                    reported,
+                    model.shown,
                     (
                         " (its DART physics builds a 'continuous' joint as a fixed one; a 'revolute'"
                         " with no limits is the same joint, and moves)"
@@ -1286,7 +1383,7 @@ def joint_states(message, model, warnings):
             note(
                 warnings,
                 "joint '%s' of model '%s' is not reported: it is not among the joint states Gazebo published"
-                % (name, model.scoped),
+                % (model.joints[name][1], model.shown),
             )
     return states
 
@@ -1304,7 +1401,7 @@ def fill(reading, streams, warnings, patience=PATIENCE):
             note(
                 warnings,
                 "the joints of model '%s' are not reported: Gazebo published no joint states for it"
-                % stream.model.scoped,
+                % stream.model.shown,
             )
             continue
         reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
@@ -1325,6 +1422,11 @@ def process(path, request):
     startup = positive(request.get("startup_timeout")) or STARTUP_TIMEOUT
     world = request.get("world_name") or world_name(scene_file)
     topic = "/world/%s/pose/info" % world
+    # PartCAD's names for what the world calls everything, out of the sidecar
+    # beside it, and what the world itself is called there: 'world' for the
+    # world PartCAD names that, which SDFormat cannot.
+    names = Names.beside(scene_file)
+    shown = names.world(world)
     warnings = []
     # Before the server is started, because it is written into the file the
     # server loads: see 'world_gravity'.
@@ -1361,7 +1463,7 @@ def process(path, request):
         # The world as handed over, or a copy of it that publishes its joints.
         # Made inside the 'try' whose 'finally' removes it, so that nothing
         # that can fail lies between the two and leaves it behind.
-        run_file, joint_models = prepare_world(scene_file, warnings)
+        run_file, joint_models = prepare_world(scene_file, warnings, names)
         command.append(run_file)
 
         # A subscriber for the joints of each model that has any, listening
@@ -1394,9 +1496,20 @@ def process(path, request):
         next_sample = every
         waiting_since = time.monotonic()
         first_by = min(deadline.at, waiting_since + startup)
+        # Pose messages that came but named no body this run reads: with a
+        # sidecar, ones in which no body's model and link appear once each.
+        unread = 0
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""
+            if before is None and unread and names.bodies and time.monotonic() >= first_by:
+                return (
+                    "Gazebo published %d pose messages for world '%s' within %.0f s of being started, and none"
+                    " named the model and link of a body the names file beside '%s' lists once each, so there is"
+                    " nothing to report. That file does not belong to the world that was loaded, or the world"
+                    " names a body's model or link twice; export the world again."
+                    % (unread, shown, time.monotonic() - waiting_since, scene_file)
+                )
             if before is None and time.monotonic() >= first_by:
                 tail = said.tail(0)
                 return (
@@ -1405,7 +1518,7 @@ def process(path, request):
                     " it loads the world, or one publishing in another partition, looks like this. Raise"
                     " 'startup_timeout' if this machine is simply slow to start one.%s"
                     % (
-                        world,
+                        shown,
                         time.monotonic() - waiting_since,
                         topic,
                         partition,
@@ -1420,7 +1533,7 @@ def process(path, request):
                         duration,
                         deadline.elapsed(),
                         deadline.budget,
-                        progress(world, before, after, poses.count, duration),
+                        progress(shown, before, after, poses.count, duration),
                     )
                 )
             return None
@@ -1435,7 +1548,7 @@ def process(path, request):
             if text is None or text is ENDED:
                 # Nothing new: the server is either working, or never will be.
                 if simulator.poll() is not None:
-                    raise Exception(server_died(simulator, said, world, before, after, poses.count, duration))
+                    raise Exception(server_died(simulator, said, shown, before, after, poses.count, duration))
                 if text is ENDED:
                     raise Exception(
                         "Gazebo's pose subscriber ('%s %s -e') stopped (%s) while the server was still running. %s"
@@ -1443,13 +1556,14 @@ def process(path, request):
                             server,
                             topic_command,
                             ended_how(watcher.poll()),
-                            progress(world, before, after, poses.count, duration),
+                            progress(shown, before, after, poses.count, duration),
                         )
                     )
                 continue
             message = parse_message(text)
-            reading = snapshot(message)
+            reading = snapshot(message, names)
             if not reading["bodies"]:
+                unread += 1
                 continue
             if before is None:
                 before = reading
@@ -1488,7 +1602,7 @@ def process(path, request):
         # report of a failed validation says what it was a validation of.
         "simulator": "gazebo",
         "version": _version([server] + list(server_args), environment, min(30.0, max(1.0, deadline.remaining()))),
-        "world": world,
+        "world": shown,
         "duration": duration,
         "reached": after["time"],
         # What the run was under, out of the file Gazebo loaded. It used to be

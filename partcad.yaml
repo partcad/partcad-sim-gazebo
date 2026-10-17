@@ -36,8 +36,12 @@ desc: Reading, writing, opening and simulating a Gazebo world, in SDFormat.
 # rather than its container's (partcad/partcad#788): without it, a part bolted
 # to a pendulum's arm would be written onto its frame and not swing.
 #
-# partcad/partcad#788 shipped in 0.8.202.
-partcad: ">=0.8.202"
+# partcad/partcad#788 shipped in 0.8.202. The world writer also writes every
+# name through PartCAD's 'naming' (partcad/partcad#799), which an older PartCAD
+# has no such module for in its sandbox, so the export would fail to import it.
+# #799 shipped in 0.8.204, and the run's wall-clock budget this simulation reads
+# as request["timeout"] (partcad/partcad#797) in 0.8.205.
+partcad: ">=0.8.205"
 
 docs:
   intro: |
@@ -53,8 +57,12 @@ docs:
     `pc sim` runs one under gravity and reports where every model ended up, so
     that a part or an assembly can state what it is supposed to do -- or not do
     -- and have that checked. `before` and `after` each carry `time` and a
-    `bodies` object: one entry per model, holding its position `pos` and its
-    orientation `quat` (`w x y z`). Positions are in **millimetres**, PartCAD's
+    `bodies` object: one entry per body, under PartCAD's name for it, holding
+    its position `pos` and its orientation `quat` (`w x y z`) in the world's
+    frame -- a link hanging off a mechanism's root as much as a model standing
+    free. A scene called `world`, which is what PartCAD's default world is, is
+    still `world` in what a run reports, although SDFormat reserves the name and
+    the file calls it something else. Positions are in **millimetres**, PartCAD's
     unit everywhere, not the metres SDFormat works in -- a validation expression
     is written by whoever wrote the part, against the numbers that part is drawn
     in.
@@ -224,6 +232,13 @@ export:
     # no light renders black, and one with no ground has nothing to stand on.
     sun: true
     ground_plane: true
+    # Write '<file>.names.json' beside the world: which SDFormat name each
+    # PartCAD body and joint became, and where each one is -- its model and its
+    # link (PartCAD's 'wrappers/naming.py'). SDFormat reserves 'world', which is
+    # what PartCAD's default world is called, so that scene's world is written
+    # under another name; a run reports under PartCAD's names by reading this.
+    # Off for a file somebody exports to open; the simulation below turns it on.
+    names_file: false
     # 'world_name' defaults to the object's label, 'mesh_dir' to
     # '<file stem>_meshes' next to the world file, 'mesh_prefix' to empty (which
     # makes the mesh references relative to the world file; a Gazebo model
@@ -313,6 +328,9 @@ simulation:
     formatOptions:
       static: false
       self_collide: true
+      # What lets the run report every body and joint under PartCAD's name,
+      # and every body's pose in the world's frame; see `names_file` above.
+      names_file: true
     # Where Gazebo comes from on a machine that does not have it.
     #
     # Unlike MuJoCo, Gazebo is not a Python package and there is no wheel that

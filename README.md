@@ -73,8 +73,9 @@ pc convert scene -t sim-gazebo:world bench      # and write it back out
 PartCAD exports the scene as a world with every free body free to move and the
 joints of every mechanism in it (see [Mechanisms](#mechanisms)), hands this
 package the file, and this package runs the server until the *simulated* clock
-reaches `duration`. It then reports where every model was at the start and at
-the end:
+reaches `duration`. It then reports where every body was at the start and at
+the end, under PartCAD's names and in the world's frame (see **Names** under
+[Mechanisms](#mechanisms)):
 
 ```json
 {
@@ -206,10 +207,29 @@ Each joint is written as SDFormat's own type wherever SDFormat has one:
   `<child>-<target>`, or the connection's `joint:` — so
   `after["joints"]["shoulder_pan"]` reads it. One written as several is
   `<name>.<parameter>` for each (`nut-bolt.turnZ`, `float-tank.ball`), the name
-  the MuJoCo plugin gives the MuJoCo joint of the same freedom. No two things in
-  a world share a name, which is why a model's first link is not called after
-  the model: Gazebo reports every pose by the bare name, and a link sharing its
-  model's name was reported in the model's place.
+  the MuJoCo plugin gives the MuJoCo joint of the same freedom. Every name goes
+  through SDFormat's own rules (`SDF_NAMES` in `export_world.py`, applied by
+  PartCAD's `wrappers/naming.py`): libsdformat reserves `world` and every
+  `__…__`, and refuses `::` anywhere; and since a world's and a model's names
+  are parts of Gazebo's transport topics, the alphabet is ASCII letters,
+  digits, `_`, `.` and `-`. A name outside them is written as the nearest one
+  inside (`world-2`, `a_b`), and the export says which -- so a scene called
+  `world`, PartCAD's default world, is the SDFormat world `world-2` and still
+  `world` in what a run reports. No two things in a world share a name, which
+  is why a model's first link is not called after the model: Gazebo reports
+  every pose by the bare name, and a link sharing its model's name was reported
+  in the model's place. PartCAD's names are claimed first, so a name this
+  exporter makes up (a model's `_link`, a dummy link, the ground plane) is the
+  one told apart.
+* **What a run reports.** With `names_file: true`, which the simulation asks
+  for, the export writes `<world>.names.json` beside the world: which SDFormat
+  name each body and joint became, and which model and link each body is. The
+  run reads it, reports every body, joint and the world under PartCAD's name,
+  and states each body at its link's pose **in the world's frame** -- the
+  model's pose composed with the link's, since Gazebo publishes a link relative
+  to its model -- which is what the MuJoCo plugin reports for the same scene. A
+  world with no such file is reported as Gazebo publishes it: every entity
+  under its own name, relative to its parent.
 * **Dummy links** weigh a gram, with an inertia of 10⁻⁶ kg·m², have no geometry,
   and are named after the joint (`<name>_link1`, ...). The export says which
   joints needed them.
@@ -492,6 +512,14 @@ need a Gazebo and `partcad` both: every row passes `gz sdf -k`, a bar released
 horizontal on a hinge passes the bottom at √(2mgd/I) and swings with the period
 4K(sin 45°)√(I/mgd) of a right-angle swing, and a nut on a screw moves 10 mm a
 turn. In the image, `pip install -q pytest numpy partcad` and run it as above.
+
+`test_names.py` checks SDFormat's rules, the sidecar, and a reading under
+PartCAD's names in the world's frame with PartCAD alone; its `in_gazebo` tests
+run a scene called `world` in a real Gazebo and hold every body to where
+PartCAD's own joint puts it, and the last runs the same scene in MuJoCo as well
+and holds the two engines to one pose. That one needs a checkout of
+[partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) named by
+`PC_SIM_MUJOCO`, and `mujoco` installed, and is skipped otherwise.
 
 `test_partition.py` checks the environment each run starts its programs in, with
 nothing but the standard library, and then runs two worlds of one name side by
