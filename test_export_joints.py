@@ -1287,6 +1287,60 @@ def test_in_gazebo_a_floating_child_s_rates_against_a_body_that_turns_are_the_en
     )
 
 
+def test_in_gazebo_a_nut_on_a_screw_moves_as_its_thread_says(gazebo, tmp_path, stand_in_geometry, export_world):
+    """Pulled down its axis by its weight, the nut moves 10 mm for every turn: 36 degrees a millimetre.
+
+    Held to the lead the interface declares ('threadStep: 10'), not to
+    anything the exporter wrote: the nut's travel is its pose in the world, as
+    Gazebo publishes it, along the screw's axis -- which the scene stands
+    upright -- and its turn is Gazebo's own joint state. A screw whose thread
+    was written wrong, or that DART built as a weld or a plain hinge, fails it.
+    """
+    import simulate_gazebo
+
+    tree = in_a_scene(
+        rig(tmp_path, "threadStep: 10\nmotion: screw", params=", toParams: {turnZ: 90}"),
+        [[0.0, 0.0, 800.0], [0.0, 0.0, 1.0], 0.0],
+    )
+    arm = kinematics.bodies(tree).by_name("arm")
+    _result, path, _sdf = module_export(export_world, tmp_path, tree, cube(0.1))
+    result = simulate_gazebo.process(
+        str(tmp_path), {"scene_file": str(path), "duration": 0.5, "samples": 24, "gravity": [0.0, 0.0, -G]}
+    )
+
+    start = result["before"]
+    assert start["time"] == 0.0
+    assert start["joints"]["arm-base"]["type"] == kinematics.SCREW
+    # Started a quarter turn round, and read there.
+    assert start["joints"]["arm-base"]["pos"]["turnZ"] == pytest.approx(90.0, abs=1e-9)
+    turned_by, travelled = [], []
+    for reading in _readings(result)[1:]:
+        turn = reading["joints"]["arm-base"]["pos"]["turnZ"] - start["joints"]["arm-base"]["pos"]["turnZ"]
+        position, origin = reading["bodies"]["arm"]["pos"], start["bodies"]["arm"]["pos"]
+        if abs(turn) < 1.0:
+            continue
+        # Along the screw and nowhere else: the nut's origin is on its axis.
+        assert position[0] == pytest.approx(origin[0], abs=1e-6) and position[1] == pytest.approx(origin[1], abs=1e-6)
+        along = position[2] - origin[2]
+        assert abs(turn) / abs(along) == pytest.approx(36.0, rel=1e-6), reading["time"]
+        # And turning about that axis alone.
+        q, q0 = reading["bodies"]["arm"]["quat"], start["bodies"]["arm"]["quat"]
+        relative = urdf_common.quat_mul(tuple(q), (q0[0], -q0[1], -q0[2], -q0[3]))
+        assert max(abs(relative[1]), abs(relative[2])) < 1e-6, reading["time"]
+        turned_by.append(turn)
+        travelled.append(along)
+    # More than a whole turn, falling, all the way down.
+    assert abs(turned_by[-1]) > 360.0 and travelled[-1] < 0.0
+    # The move that follows the turn, as PartCAD reads it, is the same thread.
+    move = next(freedom for freedom in arm.joint.freedoms if freedom.kind == kinematics.MOVE)
+    state = result["after"]["joints"]["arm-base"]
+    assert state["pos"]["moveZ"] == pytest.approx(move.ratio * state["pos"]["turnZ"] + move.offset)
+    print(
+        "screw: turned %.2f deg and fell %.4f mm, %.6f deg/mm against 36"
+        % (turned_by[-1], -travelled[-1], abs(turned_by[-1] / travelled[-1]))
+    )
+
+
 def test_in_gazebo_every_sample_asked_for_comes_back_one_a_step(gazebo, tmp_path, stand_in_geometry, export_world):
     """199 over 0.2 s is one a millisecond, Gazebo's step: far more than the sixty pose messages a second it publishes.
 

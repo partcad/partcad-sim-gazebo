@@ -1794,11 +1794,17 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
         joint_map = entry["map"]
         if joint_map.get("kind") == FLOATING:
             child, parent = bodies.get(entry.get("body")), bodies.get(joint_map.get("parent"))
-            if child is None or parent is None:
+            if parent is None:
                 note(
                     warnings,
                     "joint '%s' is not reported: the body it is read against, '%s', is not in the reading"
-                    % (name, joint_map.get("parent") if parent is None else entry.get("body")),
+                    % (name, joint_map.get("parent")),
+                )
+                continue
+            if child is None:
+                note(
+                    warnings,
+                    "joint '%s' is not reported: its own body, '%s', is not in the reading" % (name, entry.get("body")),
                 )
                 continue
             twists = (
@@ -2152,7 +2158,10 @@ def unpause(server, world, environment, timeout):
     except (OSError, subprocess.SubprocessError) as e:
         return False, "%s: %s" % (type(e).__name__, e)
     said = ((answer.stdout or "") + (answer.stderr or "")).strip()
-    return answer.returncode == 0 and "data: false" not in said, said
+    # Only an answer of 'true' is a world set running: a call that timed out
+    # prints "Service call timed out" and exits with status nought all the
+    # same (Harmonic's 'gz service'), and says nothing of what happened.
+    return answer.returncode == 0 and re.search(r"\bdata:\s*true\b", said) is not None, said
 
 
 def _version(command, environment=None, timeout=30.0):

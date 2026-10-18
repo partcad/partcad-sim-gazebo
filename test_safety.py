@@ -102,11 +102,16 @@ if args[:1] == ["sim"]:
     time.sleep(600)
 elif args[:1] == ["service"]:
     # The world's control service, which sets a world started paused running.
-    print("data: false" if mode == "stuck" else "data: true")
+    if mode == "timeout":
+        # What Harmonic's 'gz service' does when nothing answers: says so, and
+        # exits with status nought.
+        print("Service call timed out")
+    else:
+        print("data: false" if mode == "stuck" else "data: true")
 elif args[:1] == ["topic"]:
     topic = args[args.index("-t") + 1]
     if topic.endswith("/pose/info"):
-        if mode in ("ok", "silent-joints", "stuck"):
+        if mode in ("ok", "silent-joints", "stuck", "timeout"):
             for step in range(41):
                 pose(step * 0.025, 1.0 - step * 0.01)
                 time.sleep(0.005)
@@ -399,6 +404,17 @@ def test_a_world_its_server_will_not_set_running_fails_the_run_saying_so(gazebo,
 
     assert error is not None and took < 10
     assert "would not set world 'w' running" in str(error) and "data: false" in str(error)
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_control_service_that_does_not_answer_fails_the_run_though_it_exits_with_nought(gazebo, tmp_path):
+    """Only 'data: true' is a world set running: a timed-out call says nothing of what happened."""
+    gazebo("timeout")
+
+    _, error, took = run(tmp_path)
+
+    assert error is not None and took < 10
+    assert "would not set world 'w' running" in str(error) and "Service call timed out" in str(error)
     assert_nothing_outlived_the_run(gazebo)
 
 

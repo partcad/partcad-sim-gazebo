@@ -361,16 +361,24 @@ def test_a_floating_child_whose_bodies_say_nothing_either_side_is_read_without_a
     ]
 
 
-def test_a_floating_child_whose_body_is_not_in_the_reading_is_named(tmp_path, stand_in_geometry, export_world):
+def test_a_floating_child_whose_bodies_are_not_both_in_the_reading_names_the_one_that_is_missing(
+    tmp_path, stand_in_geometry, export_world
+):
+    """The body it is read against, or its own: the one to look for, and not the other."""
     _world, names, _found = exported(export_world, tmp_path, "motion: floating")
-    reading = {"time": 0.5, "bodies": {"arm": {"pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0]}}, "joints": {}}
-    warnings = []
+    at_rest = {"pos": [0.0, 0.0, 0.0], "quat": [1.0, 0.0, 0.0, 0.0]}
 
-    sim.fill(reading, [], warnings, 0.1, names)
+    def read(bodies):
+        reading, warnings = {"time": 0.5, "bodies": bodies, "joints": {}}, []
+        sim.fill(reading, [], warnings, 0.1, names)
+        assert reading["joints"] == {}
+        return warnings
 
-    assert reading["joints"] == {}
-    assert warnings == [
+    assert read({"arm": at_rest}) == [
         "joint 'arm-base' is not reported: the body it is read against, 'subject', is not in the reading"
+    ]
+    assert read({"subject": at_rest}) == [
+        "joint 'arm-base' is not reported: its own body, 'arm', is not in the reading"
     ]
 
 
