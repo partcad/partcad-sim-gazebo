@@ -675,6 +675,62 @@ def test_a_shape_used_twice_is_written_once(export_world, tmp_path):
     ]
 
 
+# A part and an assembly may share a full name -- the assembly 'nut' that holds
+# the part 'nut' -- and the core keys the assembly's entry under its kind as
+# well wherever they do ('kinematics.properties_key', partcad/partcad#809).
+SHARED_NAME = {
+    "//p:nut": {"physics": {"friction": 0.1}},
+    "assembly://p:nut": {"physics": {"friction": 0.9}},
+}
+
+
+def test_an_assembly_that_shares_its_full_name_with_a_part_gets_its_own_physics_and_the_part_its():
+    import export_world
+
+    state = {"properties": SHARED_NAME}
+    assembly = {"name": "//p:nut", "label": "nut", "kind": "assembly", "assembly": []}
+    part = {"name": "//p:nut", "label": "nut", "kind": "part", "brep": b"NUT"}
+
+    assert export_world.physics_of(assembly, state)["friction"] == 0.9
+    assert export_world.physics_of(part, state)["friction"] == 0.1
+    # An index made by hand, or for a name nothing shares, has only the full name.
+    assert (
+        export_world.physics_of(assembly, {"properties": {"//p:nut": {"physics": {"friction": 0.3}}}})["friction"]
+        == 0.3
+    )
+
+
+def test_a_body_rooted_at_such_an_assembly_touches_things_as_the_assembly_says(export_world, tmp_path):
+    """Where its part says nothing about contact, the body's own entry does: the assembly's, not the part's."""
+    root = {
+        "name": "//p:bench",
+        "label": "bench",
+        "kind": "scene",
+        "assembly": [
+            {
+                "name": "//p:nut",
+                "label": "nut",
+                "kind": "assembly",
+                "assembly": [{"name": "//p:nut", "label": "nut", "kind": "part", "brep": b"NUT"}],
+            }
+        ],
+    }
+    properties = {
+        "//p:nut": {"physics": {"mass": 0.1}},
+        "assembly://p:nut": {"physics": {"friction": 0.9}},
+    }
+
+    _result, sdf = exported(export_world, tmp_path / "bench.world", root, properties=properties)
+
+    friction = _shared_name_friction(sdf)
+    assert friction is not None and float(friction.text) == pytest.approx(0.9)
+
+
+def _shared_name_friction(sdf):
+    link = sdf.find("world/model[@name='nut']/link")
+    return link.find("collision/surface/friction/ode/mu")
+
+
 def test_what_a_part_says_about_itself_is_written_rather_than_recomputed(export_world, tmp_path):
     root = {
         "name": "//p:bench",
