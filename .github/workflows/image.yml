@@ -7,9 +7,17 @@
 # own -- the tag PartCAD pulls is the one somebody else's simulation runs in, and
 # an unreviewed branch must not be able to replace it.
 #
-# Weekly as well, because the base image moves: OSRF rebuilds
-# `osrf/ros:jazzy-simulation` with every ROS sync, and an image that is never
-# rebuilt quietly ages into a Gazebo nobody chose.
+# For linux/amd64 and linux/arm64, each on a runner of its own architecture --
+# natively, not under QEMU, which would take an hour of emulated apt and prove
+# nothing about the arm64 Gazebo running. A tag that names one architecture is
+# an image the other cannot start: PartCAD's examples run on arm64 runners too,
+# and there the sandbox fell back to an image with no Gazebo in it. So each
+# architecture is pushed by digest, untagged, and 'latest' is then one
+# manifest list naming both.
+#
+# Weekly as well, because the base image moves: `ros:jazzy-ros-base` and the
+# ROS packages on it are rebuilt with every ROS sync, and an image that is
+# never rebuilt quietly ages into a Gazebo nobody chose.
 name: Image
 
 on:
@@ -27,7 +35,7 @@ on:
   schedule:
     - cron: "0 6 * * 1"
 
-# Least privilege: only the job that pushes the image may write packages.
+# Least privilege: only the jobs that push the image may write packages.
 permissions:
   contents: read
 
@@ -40,7 +48,16 @@ env:
 
 jobs:
   image:
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    name: image (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v4
 
@@ -57,28 +74,108 @@ jobs:
   publish:
     needs: image
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-latest
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    name: publish (${{ matrix.arch }})
+    runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
       packages: write
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build
-        run: docker build -t "$IMAGE:latest" container
-
-      # Again, on what is about to be pushed: this is a build of its own, and
-      # the base image or a package can have moved since the job above.
-      - name: Check
-        run: container/check.sh "$IMAGE:latest"
+      # Pushing by digest needs BuildKit's own builder: the Docker daemon's
+      # pushes a tag or nothing.
+      - uses: docker/setup-buildx-action@v3
 
       # Through the environment rather than expanded into the script, so that
       # nothing a workflow expression evaluates to is ever read as shell.
-      - name: Publish
+      - name: Log in
         env:
           REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REGISTRY_USER: ${{ github.actor }}
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+
+      # By digest and under no tag, so that nothing is replaced yet: 'latest'
+      # moves only once every architecture is pushed and checked ('manifest').
+      - name: Build and push by digest
         run: |
           set -e
-          echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
-          docker push "$IMAGE:latest"
+          docker buildx build \
+            --output "type=image,name=$IMAGE,push-by-digest=true,name-canonical=true,push=true" \
+            --metadata-file metadata.json \
+            container
+          python3 -c 'import json; print(json.load(open("metadata.json"))["containerimage.digest"])' > digest
+          echo "pushed $IMAGE@$(cat digest)"
+
+      # Again, on exactly what was pushed: this is a build of its own, and the
+      # base image or a package can have moved since the job above.
+      - name: Check
+        run: |
+          set -e
+          docker pull "$IMAGE@$(cat digest)"
+          container/check.sh "$IMAGE@$(cat digest)"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: digest-${{ matrix.arch }}
+          path: digest
+          if-no-files-found: error
+          retention-days: 1
+
+  # One manifest list for every architecture, under every tag the image is
+  # published under -- 'latest', the one PartCAD pulls.
+  manifest:
+    needs: publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: digest-*
+          path: digests
+
+      - name: Log in
+        env:
+          REGISTRY_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REGISTRY_USER: ${{ github.actor }}
+        run: echo "$REGISTRY_TOKEN" | docker login ghcr.io -u "$REGISTRY_USER" --password-stdin
+
+      - name: Publish
+        run: |
+          set -e
+          sources=()
+          for file in digests/digest-*/digest; do
+            sources+=("$IMAGE@$(cat "$file")")
+          done
+          test "${#sources[@]}" -eq 2
+          docker buildx imagetools create -t "$IMAGE:latest" "${sources[@]}"
+
+      # What was published names both platforms, or this fails: a tag that
+      # names one is the image the other cannot start.
+      - name: Verify
+        run: |
+          set -e
+          docker buildx imagetools inspect "$IMAGE:latest"
+          docker buildx imagetools inspect --raw "$IMAGE:latest" > index.json
+          python3 - <<'CHECK'
+          import json
+          index = json.load(open("index.json"))
+          platforms = {
+              "%s/%s" % (m["platform"]["os"], m["platform"]["architecture"])
+              for m in index.get("manifests", [])
+              if m.get("platform", {}).get("os") != "unknown"
+          }
+          print("latest names", sorted(platforms))
+          assert platforms == {"linux/amd64", "linux/arm64"}, platforms
+          CHECK

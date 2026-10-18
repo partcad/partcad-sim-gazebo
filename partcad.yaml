@@ -359,14 +359,15 @@ simulation:
     # way it is the same two places `pc ide open --with gazebo` looks, which is
     # the point -- one answer to "where is Gazebo on this machine", not two.
     #
-    # OSRF's own ROS image with the simulation stack in it, which is Gazebo
-    # Harmonic -- the official image that carries a Gazebo at all. ROS installs
-    # it off PATH, so this script finds it through ROS's setup script (see
-    # 'ros_environment').
-    #
-    # A distribution rather than ':latest', because ROS images are tagged by
-    # distribution and there is no 'latest' simulation one; Jazzy is the
-    # long-term support release and pairs with Harmonic.
+    # This package's own image (`container/Dockerfile`): ROS Jazzy's simulation
+    # stack, which is Gazebo Harmonic, built the way OSRF builds
+    # `osrf/ros:jazzy-simulation` -- `ros:jazzy-ros-base` and the
+    # `ros-jazzy-simulation` packages -- because OSRF publishes that image for
+    # amd64 alone. This one is published for linux/amd64 and linux/arm64,
+    # 'latest' a manifest list of both, so that a machine of either starts it.
+    # ROS installs Gazebo off PATH, so this script finds it through ROS's setup
+    # script (see 'ros_environment'). Jazzy is the long-term support release,
+    # and pairs with Harmonic.
     dockerImage: ghcr.io/partcad/partcad-sim-gazebo:latest
     # What this script imports beyond the standard library: numpy draws the
     # snapshots (see 'snapshot_raster.py'). A sandbox's environment does not see
