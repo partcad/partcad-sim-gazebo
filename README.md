@@ -393,8 +393,11 @@ So it is found in this order:
   script has run;
 * and on a machine with neither, PartCAD's `docker` sandbox builds the run's
   environment from the image `dockerImage` in `partcad.yaml` names:
-  `osrf/ros:jazzy-simulation`, OSRF's own image with Gazebo Harmonic in it,
-  which is then the second case.
+  `ghcr.io/partcad/partcad-sim-gazebo`, this package's own image of ROS Jazzy's
+  simulation stack, which is Gazebo Harmonic (`container/Dockerfile`), and
+  which is then the second case. It is published for linux/amd64 and
+  linux/arm64, each built natively, as one tag: OSRF's own
+  `osrf/ros:jazzy-simulation`, which it is built the way of, is amd64 alone.
 
 `PC_GZ` names an installation `PATH` does not know about. A machine with none of
 these is told which way to arrange one, rather than shown a traceback.
