@@ -28,11 +28,11 @@ import os
 import sys
 
 import pytest
+from xml.etree import ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import simulate_gazebo as sim  # noqa: E402
-
 
 #
 # Finding a Gazebo
@@ -160,7 +160,9 @@ def test_the_simulated_clock_comes_out_of_the_message():
 def test_a_field_the_message_omits_reads_as_zero():
     """Protobuf text format prints no field whose value is the default."""
     reading = sim.snapshot(
-        sim.parse_message('header {\n}\npose {\n  name: "still"\n  position {\n  }\n  orientation {\n    w: 1\n  }\n}\n')
+        sim.parse_message(
+            'header {\n}\npose {\n  name: "still"\n  position {\n  }\n  orientation {\n    w: 1\n  }\n}\n'
+        )
     )
 
     assert reading["time"] == 0.0
@@ -170,7 +172,7 @@ def test_a_field_the_message_omits_reads_as_zero():
 
 def test_an_entity_with_no_name_is_kept_under_its_id():
     """Something moved; a reading that omits it is worse than an odd name."""
-    reading = sim.snapshot(sim.parse_message('header {\n}\npose {\n  id: 12\n  position {\n    z: 1\n  }\n}\n'))
+    reading = sim.snapshot(sim.parse_message("header {\n}\npose {\n  id: 12\n  position {\n    z: 1\n  }\n}\n"))
 
     assert list(reading["bodies"]) == ["entity_12"]
 
@@ -274,3 +276,47 @@ def test_a_file_that_names_no_world_says_so_rather_than_reading_nothing(tmp_path
 
     with pytest.raises(Exception, match="names no world"):
         sim.world_name(str(path))
+
+
+#
+# The step and the pace
+#
+
+
+def test_a_timestep_is_the_world_s_max_step_size_written_into_the_file_it_loads(tmp_path):
+    path = tmp_path / "w.world"
+    path.write_text('<sdf version="1.11"><world name="w"><gravity>0 0 -9.8</gravity></world></sdf>', encoding="utf-8")
+
+    assert sim.world_physics(str(path)) == 0.001
+    assert ElementTree.parse(str(path)).getroot().find("world/physics") is None
+    assert sim.world_physics(str(path), timestep=0.0005) == 0.0005
+    physics = ElementTree.parse(str(path)).getroot().find("world/physics")
+    assert physics.get("type") == "dart" and float(physics.findtext("max_step_size")) == 0.0005
+    assert physics.find("real_time_factor") is None
+
+
+def test_a_world_s_own_physics_is_kept_and_only_what_is_asked_for_changed(tmp_path):
+    path = tmp_path / "w.world"
+    path.write_text(
+        '<sdf version="1.11"><world name="w"><physics name="mine" type="dart"><max_step_size>0.002</max_step_size>'
+        "<real_time_factor>1</real_time_factor></physics></world></sdf>",
+        encoding="utf-8",
+    )
+
+    assert sim.world_physics(str(path)) == 0.002
+    assert sim.world_physics(str(path), real_time_factor=0.25) == 0.002
+    (physics,) = ElementTree.parse(str(path)).getroot().findall("world/physics")
+    assert physics.get("name") == "mine"
+    assert float(physics.findtext("max_step_size")) == 0.002 and float(physics.findtext("real_time_factor")) == 0.25
+
+
+def test_a_run_is_slowed_only_as_far_as_its_samples_need():
+    """Sixty pose messages a second of the wall clock, and one a step at most."""
+    assert sim.pace(0, 10.0, 0.001) is None
+    # Sixty readings over ten seconds: Gazebo's own pace gives them.
+    assert sim.pace(60, 10.0, 0.001) is None
+    # 599 over 0.6 s is one a millisecond: sixty a second, a sixteenth as fast.
+    assert sim.pace(599, 0.6, 0.001) == pytest.approx(0.8 * 0.001 * 60.0)
+    # More than one a step is one a step.
+    assert sim.pace(5999, 0.6, 0.001) == pytest.approx(0.8 * 0.001 * 60.0)
+    assert sim.pace(999, 0.5, 0.0005) == pytest.approx(0.8 * 0.0005 * 60.0)

@@ -24,6 +24,9 @@ What each one proves:
 * a run that will not reach its 'duration' within its budget stops itself;
 * a subscriber that never hears a joint state costs a warning and a bounded
   wait, not the run;
+* a server whose control service will not set the world running fails the
+  run, saying so -- a world is started paused, so that its first reading is
+  the world as loaded;
 * and on every one of those ways out, every program is stopped -- the server,
   what it started, every subscriber -- and the world's copy is removed.
 
@@ -34,6 +37,7 @@ Each test takes a second or two. POSIX only: the fake is a script run by its
 import os
 import sys
 import time
+from xml.etree import ElementTree
 
 import pytest
 
@@ -96,10 +100,18 @@ if args[:1] == ["sim"]:
         resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # a crash, without a core file
         os.kill(os.getpid(), signal.SIGSEGV)
     time.sleep(600)
+elif args[:1] == ["service"]:
+    # The world's control service, which sets a world started paused running.
+    if mode == "timeout":
+        # What Harmonic's 'gz service' does when nothing answers: says so, and
+        # exits with status nought.
+        print("Service call timed out")
+    else:
+        print("data: false" if mode == "stuck" else "data: true")
 elif args[:1] == ["topic"]:
     topic = args[args.index("-t") + 1]
     if topic.endswith("/pose/info"):
-        if mode in ("ok", "silent-joints"):
+        if mode in ("ok", "silent-joints", "stuck", "timeout"):
             for step in range(41):
                 pose(step * 0.025, 1.0 - step * 0.01)
                 time.sleep(0.005)
@@ -355,3 +367,83 @@ def test_in_gazebo_a_world_the_server_refuses_fails_at_once_quoting_the_server(r
     assert "published no poses for world 'refused'" in message
     assert "link with name[l] already exists" in message
     assert "\x1b[" not in message
+
+
+def _invocations(gazebo):
+    """What every program the fake was run as was asked to do, as its arguments."""
+    out = []
+    for name in os.listdir(gazebo.pids):
+        with open(os.path.join(gazebo.pids, name), encoding="utf-8") as f:
+            out.append(f.read().split())
+    return out
+
+
+def test_a_world_is_started_paused_read_at_its_start_and_then_set_running(gazebo, tmp_path):
+    """So that 'before' is the world as it was loaded, at t = 0, and not a few steps of it later."""
+    gazebo("ok")
+
+    result, error, _ = run(tmp_path)
+
+    assert error is None
+    assert result["before"]["time"] == 0.0
+    # The server, and the process of its own it starts, which the fake records
+    # under the same arguments.
+    servers = [args for args in _invocations(gazebo) if args[:1] == ["sim"]]
+    assert servers and all("-s" in args and "-r" not in args and "-z" not in args for args in servers)
+    (control,) = [args for args in _invocations(gazebo) if args[:1] == ["service"]]
+    assert control[control.index("-s") + 1] == "/world/w/control"
+    assert control[control.index("--reqtype") + 1] == "gz.msgs.WorldControl"
+    assert control[-2:] == ["pause:", "false"]
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_world_its_server_will_not_set_running_fails_the_run_saying_so(gazebo, tmp_path):
+    gazebo("stuck")
+
+    _, error, took = run(tmp_path)
+
+    assert error is not None and took < 10
+    assert "would not set world 'w' running" in str(error) and "data: false" in str(error)
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_control_service_that_does_not_answer_fails_the_run_though_it_exits_with_nought(gazebo, tmp_path):
+    """Only 'data: true' is a world set running: a timed-out call says nothing of what happened."""
+    gazebo("timeout")
+
+    _, error, took = run(tmp_path)
+
+    assert error is not None and took < 10
+    assert "would not set world 'w' running" in str(error) and "Service call timed out" in str(error)
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_timestep_is_written_into_the_world_as_its_step_and_not_passed_as_an_update_rate(gazebo, tmp_path):
+    """'gz sim -z' is iterations a second of the wall clock: it changed how fast a run went, never its step."""
+    gazebo("ok")
+
+    result, error, _ = run(tmp_path, timestep=0.0005)
+
+    assert error is None
+    physics = ElementTree.parse(str(tmp_path / "run" / "scene.world")).getroot().find("world/physics")
+    assert float(physics.findtext("max_step_size")) == 0.0005
+    servers = [args for args in _invocations(gazebo) if args[:1] == ["sim"]]
+    assert servers and all("-z" not in args for args in servers)
+
+
+def test_samples_are_paced_for_and_what_did_not_come_back_is_counted(gazebo, tmp_path):
+    """A pose message is a reading, and Gazebo publishes sixty a second of the wall clock's: a run that asks for
+    more readings a simulated second is run slower than real time to get them, and says so when it did not."""
+    gazebo("ok")
+
+    result, error, _ = run(tmp_path, samples=100)
+
+    assert error is None
+    physics = ElementTree.parse(str(tmp_path / "run" / "scene.world")).getroot().find("world/physics")
+    assert float(physics.findtext("real_time_factor")) == pytest.approx(sim.pace(100, 0.5, 0.001))
+    # The fake publishes every 25 ms whatever it is told: 20 instants of the
+    # 100, each at most once.
+    got = len(result["samples"])
+    assert 15 <= got <= 21
+    assert len({sample["time"] for sample in result["samples"]}) == got
+    assert "100 samples were asked for and %d came back" % got in " ".join(result["warnings"])

@@ -105,14 +105,22 @@ def test_no_sidecar_is_written_unless_asked_for(tmp_path, export_world):
     assert not os.path.exists(naming.sidecar_path(str(path)))
 
 
-def test_a_joint_is_recorded_where_it_is_and_what_it_is_a_freedom_of(tmp_path, stand_in_geometry, export_world):
-    tree = in_a_scene(rig(tmp_path, "motion: cylindrical"))
+def test_a_joint_is_recorded_where_it_is_what_it_is_and_how_to_read_it(tmp_path, stand_in_geometry, export_world):
+    """One SDFormat joint for one PartCAD joint, of two freedoms here, under PartCAD's name and with its map."""
+    import json
+
+    tree = in_a_scene(rig(tmp_path, "motion: universal"))
     _result, path, _sdf = export(export_world, tmp_path, tree, names_file=True)
     joints = naming.read_sidecar(str(path))["joints"]
+    joint = kinematics.bodies(tree).by_name("arm").joint
     assert joints == {
-        "arm-base.turnZ": {"path": ["subject", "arm-base.turnZ"], "joint": "arm-base"},
-        "arm-base.moveZ": {"path": ["subject", "arm-base.moveZ"], "joint": "arm-base"},
+        "arm-base": {
+            "path": ["subject", "arm-base"],
+            "joint": "arm-base",
+            "map": json.loads(json.dumps(kinematics.joint_map(joint))),
+        },
     }
+    assert [coordinate["parameter"] for coordinate in joints["arm-base"]["map"]["coordinates"]] == ["turnZ", "turnY"]
 
 
 # A model turned a quarter turn about Z and moved 100 mm along X, and its link

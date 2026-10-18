@@ -178,9 +178,9 @@ def test_nothing_in_a_static_model_is_read_however_deep():
     assert sim.plan_joints(element, "/p", []) == []
 
 
-def test_a_turn_is_revolute_while_something_limits_it_and_continuous_when_nothing_does():
-    """The line the MuJoCo plugin draws too, so either engine reads the same type
-    for the same joint whichever way its file had to spell it."""
+def test_a_turn_is_a_revolute_whatever_bounds_it_and_whatever_the_world_calls_it():
+    """A bound on either side, or on neither, is a property of the hinge and not a second kind (PartCAD has no
+    'continuous'), which is what the MuJoCo plugin reports a hinge as too: one type for one joint in either engine."""
     limit = "<axis><xyz>0 0 1</xyz><limit><lower>%s</lower><upper>%s</upper></limit></axis>"
     element = world(
         model(
@@ -198,12 +198,15 @@ def test_a_turn_is_revolute_while_something_limits_it_and_continuous_when_nothin
 
     assert {name: kind for name, (kind, _reported, _declared) in rig_model.joints.items()} == {
         "stopped": "revolute",
-        "free": "continuous",
-        "defaulted": "continuous",
-        "declared": "continuous",
+        "free": "revolute",
+        "defaulted": "revolute",
+        "declared": "revolute",
         "slide": "prismatic",
         "thread": "screw",
     }
+    # What the world called it is kept, for the warning DART's weld of a
+    # 'continuous' joint needs.
+    assert rig_model.joints["declared"][2] == "continuous"
 
 
 def test_a_joint_of_a_type_that_is_not_read_is_named_in_the_warnings():
@@ -382,11 +385,11 @@ def test_a_turn_is_read_in_degrees_and_a_move_in_millimetres():
     """The units of an interface's 'motion:'. Gazebo's are radians and metres."""
     states = sim.joint_states(
         sim.parse_message(JOINT_MESSAGE),
-        rig(swing=("continuous", "revolute"), drop=("prismatic", "prismatic")),
+        rig(swing=("revolute", "revolute"), drop=("prismatic", "prismatic")),
         [],
     )
 
-    assert states["swing"]["type"] == "continuous"
+    assert states["swing"]["type"] == "revolute"
     assert states["swing"]["pos"] == pytest.approx(90.0)
     assert states["swing"]["vel"] == pytest.approx(math.degrees(-6.2639))
     assert states["drop"] == {"type": "prismatic", "pos": 0.0, "vel": pytest.approx(-500.0)}
@@ -402,7 +405,7 @@ def test_a_coordinate_the_message_omits_reads_as_zero():
 
 def test_there_is_no_effort_because_gazebo_does_not_publish_one():
     """Not a zero: a zero nobody measured would be read as a measurement."""
-    states = sim.joint_states(sim.parse_message(JOINT_MESSAGE), rig(swing=("continuous", "revolute")), [])
+    states = sim.joint_states(sim.parse_message(JOINT_MESSAGE), rig(swing=("revolute", "revolute")), [])
 
     assert "effort" not in states["swing"]
 
@@ -412,7 +415,7 @@ def test_a_joint_gazebo_ran_with_no_freedom_is_named_rather_than_reported_as_sti
     warning says what to write instead."""
     warnings = []
 
-    states = sim.joint_states(sim.parse_message(JOINT_MESSAGE), rig(spin=("continuous", "continuous")), warnings)
+    states = sim.joint_states(sim.parse_message(JOINT_MESSAGE), rig(spin=("revolute", "continuous")), warnings)
 
     assert states == {}
     assert len(warnings) == 1
@@ -431,7 +434,7 @@ def test_a_joint_that_is_not_in_the_message_is_named_too():
 def test_a_warning_is_given_once_however_many_readings_run_into_it():
     warnings = []
     for _ in range(3):
-        sim.joint_states(sim.parse_message(JOINT_MESSAGE), rig(spin=("continuous", "continuous")), warnings)
+        sim.joint_states(sim.parse_message(JOINT_MESSAGE), rig(spin=("revolute", "continuous")), warnings)
 
     assert len(warnings) == 1
 
@@ -467,7 +470,7 @@ def test_the_joint_clock_is_the_pose_clock():
 
 
 def stream_of(*seconds):
-    stream = sim.JointStream(rig(swing=("continuous", "revolute")))
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
     stream.follow(iter("".join(stamped(s) for s in seconds).splitlines(keepends=True)))
     return stream
 
@@ -492,7 +495,7 @@ def test_a_reading_from_before_the_stream_began_takes_the_first_one_there_is():
 
 def test_a_reading_waits_for_a_stream_that_is_behind():
     """The joints run alongside the poses, not in step with them."""
-    stream = sim.JointStream(rig(swing=("continuous", "revolute")))
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
     read, write = os.pipe()
     with os.fdopen(read) as reader, os.fdopen(write, "w") as writer:
         follower = threading.Thread(target=stream.follow, args=(reader,), daemon=True)
@@ -511,7 +514,7 @@ def test_a_reading_waits_for_a_stream_that_is_behind():
 
 def test_a_stream_that_says_nothing_is_waited_for_once():
     """A publisher that is not there, rather than one that is slow."""
-    stream = sim.JointStream(rig(swing=("continuous", "revolute")))
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
 
     started = time.monotonic()
     assert stream.at(1.0, patience=0.2) is None
@@ -636,7 +639,7 @@ def test_in_gazebo_a_pendulum_loses_no_energy_on_the_way_down(swung):
     bottom = math.degrees(math.sqrt(2 * 1.0 * G * 0.5 / INERTIA))
     assert swung["after"]["joints"]["swing"]["pos"] == pytest.approx(90.0, abs=10.0)
     assert swung["after"]["joints"]["swing"]["vel"] == pytest.approx(bottom, rel=1e-2)
-    assert swung["after"]["joints"]["swing"]["type"] == "continuous"
+    assert swung["after"]["joints"]["swing"]["type"] == "revolute"
 
 
 def test_in_gazebo_a_carriage_on_a_slide_falls_in_millimetres(swung):
