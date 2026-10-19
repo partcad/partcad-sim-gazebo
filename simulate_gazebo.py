@@ -1410,12 +1410,21 @@ class Wrench:
         self.origin = origin
 
 
+# The rate a force-torque sensor is asked for to measure every step: nought,
+# which is SDFormat's "every cycle". Not one over the step, which is the same
+# thing said in hertz and is what this was: Harmonic's DART does not take a
+# step past t = 0 with a sensor asking for 2000 a second on a 0.5 ms step --
+# or for 1999 -- while 1000 runs, and so does nought. A run with a step of
+# 1 ms never met it.
+EVERY_STEP = 0.0
+
+
 def plan_wrenches(world, prefix, rate, warnings, names=AS_WRITTEN):
     """Put a force-torque sensor on every joint of 'world' between two PartCAD bodies, and its system on a model.
 
     Returns a 'Wrench' for each, in document order, the n-th publishing on
-    '<prefix>/<n>' at 'rate' a second -- every step, for a rate of one over the
-    step. Only for a world PartCAD exported: a body's loads are stated in the
+    '<prefix>/<n>' at 'rate' a second -- every step, for 'EVERY_STEP'. Only for
+    a world PartCAD exported: a body's loads are stated in the
     world's frame, which takes the sidecar's bodies to place. A joint to the
     world, which Gazebo gives no sensor, and a joint of a static model, which
     moves nothing, are passed over; the first is named in 'warnings'.
@@ -1623,9 +1632,9 @@ def prepare_world(scene_file, warnings, names=AS_WRITTEN, loads=None):
     Joints of a model the world brings in with '<include>' are not read: they
     are in another file. PartCAD's exporter writes everything into the one.
 
-    With 'loads' -- a rate, a second -- every joint between two bodies also
-    gets a force-torque sensor ('plan_wrenches'), and the models come back with
-    a 'Wrench' for each of those beside them.
+    With 'loads' -- a rate, a second, or 'EVERY_STEP' -- every joint between
+    two bodies also gets a force-torque sensor ('plan_wrenches'), and the
+    models come back with a 'Wrench' for each of those beside them.
     """
     try:
         tree = ElementTree.parse(scene_file)
@@ -1638,7 +1647,7 @@ def prepare_world(scene_file, warnings, names=AS_WRITTEN, loads=None):
     if world is None:
         return scene_file, []
     models = plan_joints(world, "/partcad/joint_state", warnings, names)
-    if loads:
+    if loads is not None:
         # And a force-torque sensor on every joint, read at 'loads' a second
         # (see 'plan_wrenches'), as 'Wrench' entries beside the models.
         models += plan_wrenches(world, "/partcad/wrench", loads, warnings, names)
@@ -2229,7 +2238,9 @@ def process(path, request):
         # The world as handed over, or a copy of it that publishes its joints.
         # Made inside the 'try' whose 'finally' removes it, so that nothing
         # that can fail lies between the two and leaves it behind.
-        run_file, joint_models = prepare_world(scene_file, warnings, names, (1.0 / step) if loads else None)
+        # Every step, which SDFormat spells as a rate of nought; see
+        # 'EVERY_STEP'.
+        run_file, joint_models = prepare_world(scene_file, warnings, names, EVERY_STEP if loads else None)
         command.append(run_file)
         # Each body's mass and centre of mass, out of the world, for its weight.
         inertials = link_inertials(scene_file) if loads else {}

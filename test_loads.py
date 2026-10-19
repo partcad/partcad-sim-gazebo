@@ -106,6 +106,20 @@ def test_a_world_with_no_names_beside_it_is_given_nothing():
     assert element.find(".//sensor") is None
 
 
+def test_a_sensor_asked_for_every_step_is_asked_for_a_rate_of_nought(tmp_path):
+    """SDFormat's "every cycle": a rate of one over a 0.5 ms step stops Gazebo at t = 0."""
+    scene = tmp_path / "rig.world"
+    scene.write_text(RIG, encoding="utf-8")
+
+    run_file, models = sim.prepare_world(str(scene), [], NAMES, loads=sim.EVERY_STEP)
+
+    try:
+        assert [model.joint for model in models if isinstance(model, sim.Wrench)] == ["hold"]
+        assert ElementTree.parse(run_file).getroot().find(".//sensor").findtext("update_rate") == "0"
+    finally:
+        os.remove(run_file)
+
+
 def test_the_world_that_runs_is_a_copy_with_the_sensors_in_it(tmp_path):
     scene = tmp_path / "rig.world"
     scene.write_text(RIG, encoding="utf-8")
