@@ -956,11 +956,16 @@ class Planner:
 
         The parts ('kinematics.parts_entry()') are what a run reports as
         'parts', so that the loads it reads on a body can be read as a part's.
+        A PartCAD from before 'parts_entry()' cannot say, and its runs report
+        the loads without 'parts'.
         """
+        parts_entry = getattr(kinematics, "parts_entry", None)
         out = {}
         for model in self.models:
             for link in model.links:
-                out[link.body.name] = {"path": [model.name, link.name], "parts": kinematics.parts_entry(link.body)}
+                out[link.body.name] = {"path": [model.name, link.name]}
+                if parts_entry is not None:
+                    out[link.body.name]["parts"] = parts_entry(link.body)
         return out
 
     def _not_one_axis(self, joint, kind):

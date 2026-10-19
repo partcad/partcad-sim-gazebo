@@ -45,6 +45,14 @@ from test_export_joints import (  # noqa: E402,F401
     weighed,
 )
 
+# Which parts a body is, in the names file and as a run's 'parts', is what a
+# PartCAD that can say writes ('kinematics.parts_entry()', read back by
+# 'naming.parts_of()'); an older one writes and runs the same world without it.
+NEEDS_PARTS = pytest.mark.skipif(
+    not hasattr(kinematics, "parts_entry") or not hasattr(naming, "parts_of"),
+    reason="this PartCAD cannot say which parts a body is (partcad/partcad#823)",
+)
+
 
 def scene_of(*labels, label="world"):
     """A scene of free parts with these labels, side by side."""
@@ -98,10 +106,28 @@ def test_a_scene_called_world_is_written_under_another_name_and_the_sidecar_says
         "cube": ["cube", "cube_link"],
         "ground_plane": ["ground_plane", "ground_plane_link"],
     }
-    # And which part each body is, by its path of labels, at the body's own
-    # frame: what a run reports as 'parts' (see 'naming.parts_of').
+
+
+@NEEDS_PARTS
+def test_the_names_file_says_which_part_each_body_is(tmp_path, export_world):
+    """By its path of labels, at the body's own frame: what a run reports as 'parts' (see 'naming.parts_of')."""
+    _result, path, _sdf = export(export_world, tmp_path, scene_of("world", "cube"), names_file=True)
+    sidecar = naming.read_sidecar(str(path))
     assert sidecar["bodies"]["cube"]["parts"] == [{"label": "cube", "part": "//p:1", "placement": None}]
     assert naming.parts_of(sidecar)["world"] == {"part": "//p:0", "body": "world", "placement": None}
+
+
+def test_a_partcad_that_cannot_say_which_parts_a_body_is_writes_the_same_world(tmp_path, export_world, monkeypatch):
+    """A PartCAD from before 'kinematics.parts_entry()': the world and its names, and no 'parts' to report."""
+    monkeypatch.delattr(kinematics, "parts_entry", raising=False)
+    _result, path, _sdf = export(export_world, tmp_path, scene_of("world", "cube"), names_file=True)
+    sidecar = naming.read_sidecar(str(path))
+    assert {name: entry["path"] for name, entry in sidecar["bodies"].items()} == {
+        "world": ["world-2", "world-2_link"],
+        "cube": ["cube", "cube_link"],
+    }
+    assert "parts" not in sidecar["bodies"]["cube"]
+    assert sim.Names(sidecar).parts == {}
 
 
 def test_no_sidecar_is_written_unless_asked_for(tmp_path, export_world):

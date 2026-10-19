@@ -264,7 +264,9 @@ What Gazebo gives, and what it does not:
 
 Like the poses, loads are read for a world PartCAD exported — the names file
 beside it places each body in the world's frame — and a result says which body
-each part is in, as `parts`. `params: {loads: false}` reports poses alone.
+each part is in, as `parts`, with a PartCAD that can say which parts a body is
+(`kinematics.parts_entry()`); with an older one a run reports the same loads and
+no `parts`. `params: {loads: false}` reports poses alone.
 
 ## Mechanisms
 
