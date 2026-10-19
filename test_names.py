@@ -93,11 +93,15 @@ def test_a_scene_called_world_is_written_under_another_name_and_the_sidecar_says
     sidecar = naming.read_sidecar(str(path))
     assert sidecar["format"] == "world"
     assert sidecar["names"]["scene"] == {"world": "world-2"}
-    assert sidecar["bodies"] == {
-        "world": {"path": ["world-2", "world-2_link"]},
-        "cube": {"path": ["cube", "cube_link"]},
-        "ground_plane": {"path": ["ground_plane", "ground_plane_link"]},
+    assert {name: entry["path"] for name, entry in sidecar["bodies"].items()} == {
+        "world": ["world-2", "world-2_link"],
+        "cube": ["cube", "cube_link"],
+        "ground_plane": ["ground_plane", "ground_plane_link"],
     }
+    # And which part each body is, by its path of labels, at the body's own
+    # frame: what a run reports as 'parts' (see 'naming.parts_of').
+    assert sidecar["bodies"]["cube"]["parts"] == [{"label": "cube", "part": "//p:1", "placement": None}]
+    assert naming.parts_of(sidecar)["world"] == {"part": "//p:0", "body": "world", "placement": None}
 
 
 def test_no_sidecar_is_written_unless_asked_for(tmp_path, export_world):
