@@ -260,7 +260,11 @@ What Gazebo gives, and what it does not:
   **contacts** and its **acceleration**, which this plugin does not read from
   Gazebo, so a body's loads here need not add up to its mass times anything;
   and, at the first reading, every joint's load: it is taken while the world is
-  paused, and the sensors measure nothing then.
+  paused, and the sensors measure nothing then. So is a joint whose body is
+  missing: a joint is stated about its child, so one whose child is not in a
+  reading is not reported, one whose parent is not is reported on its child
+  alone, and one whose link is none of the bodies in the names file gets no
+  sensor at all.
 
 Like the poses, loads are read for a world PartCAD exported — the names file
 beside it places each body in the world's frame — and a result says which body
@@ -665,8 +669,9 @@ and run it as above.
 
 `test_loads.py` checks the force-torque sensors a run adds to a world — one
 on every joint between two bodies, none on a static model's, the system once
-on a model — the weights it reads out of the world, and a sensor's wrench
-turned into the world's frame at the joint on both bodies, with PartCAD alone;
+on a model — the weights it reads out of the world, a sensor's wrench
+turned into the world's frame at the joint on both bodies, and a joint whose
+body is missing named in `warnings` rather than dropped, with PartCAD alone;
 its last test runs an arm held level by its hinge's spring in a real Gazebo and
 holds the hinge to the arm's weight and the moment of it.
 

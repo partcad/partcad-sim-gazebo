@@ -100,6 +100,41 @@ def test_every_joint_between_two_bodies_is_given_a_sensor_and_the_world_the_syst
     assert any("what holds 'frame' to the world is not among its loads" in w for w in warnings)
 
 
+def test_a_joint_whose_link_is_none_of_the_bodies_is_named_rather_than_dropped():
+    """A names file out of step with its world: the joint's load would vanish from both ends unremarked."""
+    element = world()
+    stale = sim.Names(
+        {
+            "bodies": {"frame": {"path": ["rig", "frame"]}},
+            "joints": {"knee": {"path": ["rig", "hold"], "joint": "knee"}},
+        }
+    )
+    warnings = []
+
+    assert sim.plan_wrenches(element, "/partcad/wrench", 1000.0, warnings, stale) == []
+
+    assert element.find(".//sensor") is None
+    assert any(
+        "the load of joint 'knee' is not reported: its child link, 'arm', is none of the bodies" in w for w in warnings
+    )
+
+    element = world()
+    orphan = sim.Names(
+        {
+            "bodies": {"arm": {"path": ["rig", "arm"]}},
+            "joints": {"knee": {"path": ["rig", "hold"], "joint": "knee"}},
+        }
+    )
+    warnings = []
+
+    assert sim.plan_wrenches(element, "/partcad/wrench", 1000.0, warnings, orphan) == []
+
+    assert any(
+        "the load of joint 'knee' is not reported: its parent link, 'frame', is none of the bodies" in w
+        for w in warnings
+    )
+
+
 def test_a_world_with_no_names_beside_it_is_given_nothing():
     element = world()
     assert sim.plan_wrenches(element, "/p", 1000.0, [], sim.AS_WRITTEN) == []
@@ -237,6 +272,35 @@ def test_a_sensor_that_said_nothing_is_named_rather_than_read_as_nought():
 
     assert "loads" not in seen["bodies"]["arm"]
     assert any("the load of joint 'knee' is not reported" in w for w in warnings)
+
+
+def test_a_joint_whose_child_is_not_in_the_reading_is_named_rather_than_dropped():
+    seen = reading((1.0, 0.0, 0.0, 0.0))
+    del seen["bodies"]["arm"]
+    wrench = sim.Wrench("/t/0", "rig", "hold", "knee", "arm", "frame", ((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+    warnings = []
+
+    sim.fill_loads(seen, [Stream(wrench, wrench_message([0, 0, 9.81], [0, 0, 0]))], {}, [0, 0, -9.81], warnings)
+
+    # Not even on the frame: the wrench is measured in the child's orientation,
+    # and there is no child to turn it by.
+    assert "loads" not in seen["bodies"]["frame"]
+    assert any("the load of joint 'knee' is not reported: its child body, 'arm', is not in" in w for w in warnings)
+
+
+def test_a_joint_whose_parent_is_not_in_the_reading_is_reported_on_its_child_alone_and_says_so():
+    seen = reading((1.0, 0.0, 0.0, 0.0))
+    del seen["bodies"]["frame"]
+    wrench = sim.Wrench("/t/0", "rig", "hold", "knee", "arm", "frame", ((1.0, 0.0, 0.0, 0.0), (0.0, 0.0, 0.0)))
+    warnings = []
+
+    sim.fill_loads(seen, [Stream(wrench, wrench_message([0, 0, 9.81], [0, 0, 0]))], {}, [0, 0, -9.81], warnings)
+
+    (held,) = seen["bodies"]["arm"]["loads"]
+    assert (held["from"], held["force"]) == ("frame", pytest.approx([0.0, 0.0, 9.81]))
+    assert warnings == [
+        "the load of joint 'knee' is reported on 'arm' alone: its parent body, 'frame', is not in the reading"
+    ]
 
 
 def test_a_run_says_which_body_each_part_is_in():
