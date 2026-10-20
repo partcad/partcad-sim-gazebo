@@ -221,6 +221,53 @@ and each reading takes the one of its own simulated instant, so a reading's
 joints and its bodies are the same moment; the first reading is the first
 instant every joint stream has reached.
 
+### Loads
+
+Every body in a reading also says **what acts on it**, in the vocabulary
+[partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco#loads)
+states it in, as far as Gazebo tells a run: its `mass` and its centre of mass
+(`com`, mm), and `loads`, each with its `kind`, what it comes `from`, where it
+acts (`at`, mm), and the `force` (N) on the body and the `torque` (N·m) about
+`at`, in the world's frame:
+
+```json
+"arm": {
+  "pos": [500.0, 0.0, 1000.0], "quat": [...], "mass": 1.0, "com": [599.9, 0.0, 991.2],
+  "loads": [
+    {"kind": "joint", "from": "frame", "joint": "knee", "at": [0.0, 0.0, 1000.0],
+     "force": [0.0, 0.0, 9.81], "torque": [0.0, -5.885, 0.0]},
+    {"kind": "gravity", "from": "arm", "at": [599.9, 0.0, 991.2],
+     "force": [0.0, 0.0, -9.81], "torque": [0.0, 0.0, 0.0]}
+  ]
+}
+```
+
+What Gazebo gives, and what it does not:
+
+* **What a joint passes** — its constraint, and its spring, damper and friction
+  — is what Gazebo's force-torque sensor measures, so the world that runs has
+  one on every joint between two bodies, and the ForceTorque system on a model
+  (a system attached to the world would turn Gazebo's defaults off). Each
+  measures the wrench the parent applies to the child, about the joint's
+  origin; the run turns it into the world's frame. The child reports it from
+  its parent, and the parent the same reversed. The arm above — 1 kg, its
+  centre 600 mm out, held level by its hinge's spring — reads its weight and
+  m·g·d to four figures, as it does in MuJoCo.
+* **A body's weight** is its link's `<inertial>` under the world's gravity, at
+  its centre of mass.
+* **Not reported, and said in `warnings`:** what holds a body a scene fixes —
+  Harmonic makes no force-torque sensor on a joint to the world; a body's
+  **contacts** and its **acceleration**, which this plugin does not read from
+  Gazebo, so a body's loads here need not add up to its mass times anything;
+  and, at the first reading, every joint's load: it is taken while the world is
+  paused, and the sensors measure nothing then.
+
+Like the poses, loads are read for a world PartCAD exported — the names file
+beside it places each body in the world's frame — and a result says which body
+each part is in, as `parts`, with a PartCAD that can say which parts a body is
+(`kinematics.parts_entry()`); with an older one a run reports the same loads and
+no `parts`. `params: {loads: false}` reports poses alone.
+
 ## Mechanisms
 
 The world exporter writes the bodies PartCAD's body rule finds (`kinematics` in
@@ -423,6 +470,7 @@ of one `simulate:` entry (per simulation).
 | `gravity` | the scene's | m/s², in the scene's frame. Overrides the scene's `gravity:` for this run, by writing it into the world before Gazebo loads it; unset, the run is under the scene's, or SDFormat's `[0, 0, -9.8]` when the scene states none. |
 | `timeout` | PartCAD's | Wall-clock seconds the whole run may take. PartCAD works it out and hands it to every run; `300.0` where it does not. See below. |
 | `startup_timeout` | `120.0` | Wall-clock seconds the server may take to publish its first pose. |
+| `loads` | `true` | Report what acts on every body, in every reading (see [Loads](#loads)); `false` reports poses alone and runs the world without force-torque sensors. |
 | `samples` | `0` | Report the state at this many evenly spaced instants too, as `samples`: each the first pose message at or past its instant that no sample before it took, at its own `time` (an instant or so late at worst). Gazebo publishes poses sixty times a second *of the wall clock*, so a run asking for more readings a simulated second than that runs slower than real time to give them (`<real_time_factor>`), never more than one a step; if fewer come back than were asked for, `warnings` says how many of how many. |
 
 The reader and the writer take parameters of their own; `partcad.yaml` lists
@@ -589,7 +637,7 @@ simulation itself uses:
 docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 --entrypoint bash \
     ghcr.io/partcad/partcad-sim-gazebo:latest -c \
     'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \
-     && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py test_partition.py'
+     && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py test_partition.py test_loads.py'
 ```
 
 `test_export_joints.py` builds mechanisms with PartCAD's own ASSY code, a
@@ -614,6 +662,13 @@ falling free beside the swinging bar has, against the bar, the rates the
 engine's own velocities give and turns at the bar's speed; and a nut on a screw
 moves 10 mm a turn. In the image, `pip install -q pytest numpy partcad`
 and run it as above.
+
+`test_loads.py` checks the force-torque sensors a run adds to a world — one
+on every joint between two bodies, none on a static model's, the system once
+on a model — the weights it reads out of the world, and a sensor's wrench
+turned into the world's frame at the joint on both bodies, with PartCAD alone;
+its last test runs an arm held level by its hinge's spring in a real Gazebo and
+holds the hinge to the arm's weight and the moment of it.
 
 `test_readings.py` reads each kind of joint back through the joint map the
 exporter wrote, with PartCAD alone: a number for one freedom and an object

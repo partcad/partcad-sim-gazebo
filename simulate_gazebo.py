@@ -68,6 +68,16 @@ copy of the one handed over with that system added; see 'plan_joints' and
 'JointStream'. A ball and a floating child are read from where their bodies
 are instead; see 'posed_states'.
 
+**What holds each body, and how hard.** Every body in a reading also says what
+acts on it, as ``loads`` beside its pose, in the vocabulary the MuJoCo plugin
+states them in: its weight, out of the world's '<inertial>', and what each of
+its joints passes it, which Gazebo measures only with a force-torque sensor on
+the joint -- so the world that runs carries one on every joint between two
+bodies, and the system that reads them; see 'plan_wrenches' and 'fill_loads'.
+What Gazebo does not give -- a weld to the world, contacts, accelerations, and
+anything at the first reading, taken while the world is paused -- is named in
+'warnings' rather than reported as nought.
+
 **Names are PartCAD's, and poses the world's.** A validation reads
 ``after["bodies"]["arm"]`` and ``after["joints"]["swing"]`` by the names PartCAD
 gave them, and a world cannot hold every one of those as it is: SDFormat
@@ -554,6 +564,16 @@ class Names:
                     self.maps[key] = entry
             if mapped and entry["map"].get("kind") in POSED:
                 self.posed[name] = entry
+        # Part label -> the PartCAD body it is welded into, what it is and
+        # where it sits in that body ('naming.parts_of'): what a run reports as
+        # 'parts', so that a body's loads can be read as a part's.
+        try:
+            import naming
+
+            self.parts = naming.parts_of(sidecar)
+        except (ImportError, AttributeError):
+            # A PartCAD from before a sidecar said which parts a body is.
+            self.parts = {}
         names = sidecar.get("names") or {}
         self.scenes = {str(internal): name for name, internal in (names.get("scene") or {}).items()}
         self.models = {str(internal): name for name, internal in (names.get("body") or {}).items()}
@@ -1339,7 +1359,262 @@ def plan_joints(world, prefix, warnings, names=AS_WRITTEN):
     return models
 
 
-def prepare_world(scene_file, warnings, names=AS_WRITTEN):
+#
+# Reading what holds each body
+#
+# What a joint passes from one body to the other is what Gazebo's force-torque
+# sensor measures -- the wrench the ForceTorque system reads off the joint's
+# 'JointTransmittedWrench', its constraint and its spring, damper and friction
+# together -- and Gazebo makes one only for a joint that carries a
+# '<sensor type="force_torque">', in a world that runs the ForceTorque system.
+# So, as for the joint states, the world that runs is a copy with a sensor on
+# every joint that moves and the system added: once, to a model, for the reason
+# the publishers are -- a system attached to the world would turn off the
+# defaults. Each sensor measures the wrench the parent applies to the child,
+# about the joint's origin and in the child link's orientation ('parent_to_child'
+# in the 'child' frame), on a topic of this run's own.
+#
+# What it does not give: a joint to the world -- a body a scene fixes -- gets no
+# sensor (Harmonic makes none for one), and the contacts are not read. Each is
+# named in 'warnings' rather than reported as nought, and so is that Gazebo
+# publishes no accelerations. A body's weight is the world file's: its link's
+# '<inertial>'.
+
+FORCE_TORQUE = {
+    "filename": "gz-sim-forcetorque-system",
+    "name": "gz::sim::systems::ForceTorque",
+}
+
+# What a load from the world names as where it is from.
+WORLD = "world"
+
+
+class Wrench:
+    """One joint whose wrench is read: where its sensor publishes, and what it joins."""
+
+    # Read by 'fill', which reads joint states off every stream but these.
+    links = False
+
+    def __init__(self, topic, scoped, joint, reported, child, parent, origin):
+        self.topic = topic
+        # The model and the joint as the world names them.
+        self.scoped = scoped
+        self.joint = joint
+        # PartCAD's name for the joint, where there is one.
+        self.reported = reported
+        # The PartCAD body of its child link, and of its parent link or 'world'.
+        self.child = child
+        self.parent = parent
+        # The joint's frame in its child link's, '(q, t)' with 't' in mm: where
+        # its sensor measures about.
+        self.origin = origin
+
+
+# The rate a force-torque sensor is asked for to measure every step: nought,
+# which is SDFormat's "every cycle". Not one over the step, which is the same
+# thing said in hertz and is what this was: Harmonic's DART does not take a
+# step past t = 0 with a sensor asking for 2000 a second on a 0.5 ms step --
+# or for 1999 -- while 1000 runs, and so does nought. A run with a step of
+# 1 ms never met it.
+EVERY_STEP = 0.0
+
+
+def plan_wrenches(world, prefix, rate, warnings, names=AS_WRITTEN):
+    """Put a force-torque sensor on every joint of 'world' between two PartCAD bodies, and its system on a model.
+
+    Returns a 'Wrench' for each, in document order, the n-th publishing on
+    '<prefix>/<n>' at 'rate' a second -- every step, for 'EVERY_STEP'. Only for
+    a world PartCAD exported: a body's loads are stated in the
+    world's frame, which takes the sidecar's bodies to place. A joint to the
+    world, which Gazebo gives no sensor, and a joint of a static model, which
+    moves nothing, are passed over; the first is named in 'warnings'.
+    """
+    import gazebo_common
+
+    bodies = {tuple(path): name for name, path in names.bodies.items()}
+    if not bodies:
+        return []
+    found = []
+    host = None
+
+    def visit(model, scope, static):
+        nonlocal host
+        scoped = scope + [model.get("name") or "model"]
+        static = static or (model.findtext("static") or "").strip().lower() in ("true", "1")
+        for joint in model.findall("joint") if not static else ():
+            name = joint.get("name")
+            child = bodies.get(tuple(scoped) + tuple((joint.findtext("child") or "").strip().split("::")))
+            parent_link = (joint.findtext("parent") or "").strip()
+            if not name or child is None:
+                continue
+            if parent_link == "world":
+                note(
+                    warnings,
+                    "what holds '%s' to the world is not among its loads: Gazebo makes no force-torque sensor on a"
+                    " joint to the world" % child,
+                )
+                continue
+            parent = bodies.get(tuple(scoped) + tuple(parent_link.split("::")))
+            if parent is None:
+                continue
+            pose = joint.find("pose")
+            if pose is not None and (pose.get("relative_to") or "").strip() not in ("", joint.findtext("child")):
+                note(
+                    warnings,
+                    "the load of joint '%s' is not reported: its frame is stated relative to '%s', and this plugin"
+                    " reads a joint's frame in its child link's" % (name, pose.get("relative_to")),
+                )
+                continue
+            topic = "%s/%d" % (prefix, len(found))
+            sensor = ElementTree.SubElement(joint, "sensor", {"name": "partcad_wrench", "type": "force_torque"})
+            ElementTree.SubElement(sensor, "always_on").text = "1"
+            ElementTree.SubElement(sensor, "update_rate").text = "%g" % rate
+            ElementTree.SubElement(sensor, "topic").text = topic
+            measured = ElementTree.SubElement(sensor, "force_torque")
+            ElementTree.SubElement(measured, "frame").text = "child"
+            ElementTree.SubElement(measured, "measure_direction").text = "parent_to_child"
+            found.append(
+                Wrench(
+                    topic,
+                    "::".join(scoped),
+                    name,
+                    names.joint("::".join(scoped), name) or name,
+                    child,
+                    parent,
+                    gazebo_common.parse_pose(pose),
+                )
+            )
+            host = host if host is not None else model
+        for nested in model.findall("model"):
+            visit(nested, scoped, static)
+
+    for model in world.findall("model"):
+        visit(model, [], False)
+    if host is not None:
+        ElementTree.SubElement(host, "plugin", dict(FORCE_TORQUE))
+    return found
+
+
+def link_inertials(scene_file):
+    """Each link's mass, kg, and centre of mass in its frame (mm), by (model, ..., link): a body's weight."""
+    import gazebo_common
+
+    root = ElementTree.parse(scene_file).getroot()
+    world = root if root.tag == "world" else root.find("world")
+    found = {}
+
+    def visit(model, scope):
+        scoped = scope + (model.get("name") or "model",)
+        for link in model.findall("link"):
+            inertial = link.find("inertial")
+            if inertial is None or inertial.findtext("mass") is None:
+                continue
+            try:
+                mass = float(inertial.findtext("mass"))
+            except ValueError:
+                continue
+            found[scoped + (link.get("name"),)] = (mass, gazebo_common.parse_pose(inertial.find("pose"))[1])
+        for nested in model.findall("model"):
+            visit(nested, scoped)
+
+    for model in world.findall("model") if world is not None else ():
+        visit(model, ())
+    return found
+
+
+def _vector(data):
+    """A protobuf 'Vector3d' as Gazebo prints it, each field nought where it leaves it out."""
+    data = data if isinstance(data, dict) else {}
+    return [float(data.get(axis) or 0.0) for axis in ("x", "y", "z")]
+
+
+def fill_loads(reading, streams, inertials, gravity, warnings, patience=PATIENCE, names=AS_WRITTEN, paused=False):
+    """State in 'reading' what acts on every body at its instant: its weight, and what each joint passes it.
+
+    In the vocabulary the MuJoCo plugin states it in (its 'body_loads'): per
+    body, 'mass' and 'com', and 'loads', each with its 'kind', 'from', 'joint',
+    'at' (mm), 'force' (N) and 'torque' (N*m about 'at'), in the world's frame
+    and acting on the body. A joint's load is its sensor's wrench, turned from
+    the child link's orientation into the world's and stated at the joint's
+    origin; the child reports it from its parent and the parent the same
+    reversed. A body's weight is its link's mass under the world's gravity, at
+    its centre of mass.
+
+    'paused' is the first reading, taken while the world is paused: Gazebo's
+    force-torque sensors measure nothing then, so that reading carries the
+    weights alone, and says why.
+    """
+    import urdf_common
+
+    bodies = reading["bodies"]
+    joints, weights = {}, {}
+    for name, body in bodies.items():
+        inertial = inertials.get(tuple(names.bodies.get(name) or ()))
+        if inertial is None:
+            continue
+        mass, centre = inertial
+        com = [p + v for p, v in zip(body["pos"], urdf_common.rotate_vec(tuple(body["quat"]), centre))]
+        body["mass"] = mass
+        body["com"] = com
+        weights[name] = {
+            "kind": "gravity",
+            "from": name,
+            "at": com,
+            "force": [mass * g for g in gravity],
+            "torque": [0.0, 0.0, 0.0],
+        }
+    if paused and streams:
+        note(
+            warnings,
+            "the first reading's loads are its bodies' weights alone: it is taken while the world is paused, and"
+            " Gazebo's force-torque sensors measure nothing then",
+        )
+        streams = ()
+    for stream in streams:
+        sensor = stream.model
+        child = bodies.get(sensor.child)
+        if child is None:
+            continue
+        text = stream.at(reading["time"], patience)
+        if text is None:
+            note(
+                warnings,
+                "the load of joint '%s' is not reported: Gazebo published nothing from its force-torque sensor"
+                % sensor.reported,
+            )
+            continue
+        message = parse_message(text)
+        rotation = tuple(child["quat"])
+        force = list(urdf_common.rotate_vec(rotation, _vector(message.get("force"))))
+        torque = list(urdf_common.rotate_vec(rotation, _vector(message.get("torque"))))
+        at = [p + v for p, v in zip(child["pos"], urdf_common.rotate_vec(rotation, sensor.origin[1]))]
+        joints.setdefault(sensor.child, []).append(
+            {
+                "kind": "joint",
+                "from": sensor.parent,
+                "joint": sensor.reported,
+                "at": at,
+                "force": force,
+                "torque": torque,
+            }
+        )
+        if sensor.parent in bodies:
+            joints.setdefault(sensor.parent, []).append(
+                {
+                    "kind": "joint",
+                    "from": sensor.child,
+                    "joint": sensor.reported,
+                    "at": list(at),
+                    "force": [-v for v in force],
+                    "torque": [-v for v in torque],
+                }
+            )
+    for name, body in bodies.items():
+        if name in weights or name in joints:
+            body["loads"] = joints.get(name, []) + ([weights[name]] if name in weights else [])
+
+
+def prepare_world(scene_file, warnings, names=AS_WRITTEN, loads=None):
     """The world to run, and the models whose joints are read in it.
 
     The world as it was handed over when nothing in it has a joint to read -- so
@@ -1356,6 +1631,10 @@ def prepare_world(scene_file, warnings, names=AS_WRITTEN):
 
     Joints of a model the world brings in with '<include>' are not read: they
     are in another file. PartCAD's exporter writes everything into the one.
+
+    With 'loads' -- a rate, a second, or 'EVERY_STEP' -- every joint between
+    two bodies also gets a force-torque sensor ('plan_wrenches'), and the
+    models come back with a 'Wrench' for each of those beside them.
     """
     try:
         tree = ElementTree.parse(scene_file)
@@ -1368,6 +1647,10 @@ def prepare_world(scene_file, warnings, names=AS_WRITTEN):
     if world is None:
         return scene_file, []
     models = plan_joints(world, "/partcad/joint_state", warnings, names)
+    if loads is not None:
+        # And a force-torque sensor on every joint, read at 'loads' a second
+        # (see 'plan_wrenches'), as 'Wrench' entries beside the models.
+        models += plan_wrenches(world, "/partcad/wrench", loads, warnings, names)
     if not models:
         return scene_file, []
     stem, extension = os.path.splitext(os.path.basename(scene_file))
@@ -1861,6 +2144,9 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
     links = {}
     in_step = True
     for stream in streams:
+        if isinstance(stream.model, Wrench):
+            # A joint's load, which 'fill_loads' reads.
+            continue
         if stream.model.links:
             links[stream.model.scoped] = stream
             continue
@@ -1899,6 +2185,13 @@ def process(path, request):
     names = Names.beside(scene_file)
     shown = names.world(world)
     warnings = []
+    # Whether every reading says what acts on each body (see 'fill_loads'):
+    # yes, unless the 'simulate:' asked for nothing but poses -- and only for a
+    # world PartCAD exported, whose sidecar places each body in the world.
+    loads = request.get("loads", True) is not False
+    if loads and not names.bodies:
+        note(warnings, "no loads are reported: they are read for a world PartCAD exported, with its names beside it")
+        loads = False
     # Before the server is started, because they are written into the file
     # the server loads: see 'world_gravity' and 'world_physics'.
     gravity = world_gravity(scene_file, request.get("gravity"))
@@ -1945,8 +2238,18 @@ def process(path, request):
         # The world as handed over, or a copy of it that publishes its joints.
         # Made inside the 'try' whose 'finally' removes it, so that nothing
         # that can fail lies between the two and leaves it behind.
-        run_file, joint_models = prepare_world(scene_file, warnings, names)
+        # Every step, which SDFormat spells as a rate of nought; see
+        # 'EVERY_STEP'.
+        run_file, joint_models = prepare_world(scene_file, warnings, names, EVERY_STEP if loads else None)
         command.append(run_file)
+        # Each body's mass and centre of mass, out of the world, for its weight.
+        inertials = link_inertials(scene_file) if loads else {}
+        if loads:
+            note(
+                warnings,
+                "a body's contacts are not among its loads, and neither is its acceleration: this plugin reads"
+                " neither from Gazebo, so a body's loads need not add up to anything",
+            )
 
         # A subscriber for the joints of each model that has any -- and for
         # the links of each that has a ball, whose speed is read from them --
@@ -1962,6 +2265,7 @@ def process(path, request):
             )
             streams.append((LinkStream if model.links else JointStream)(model))
             threading.Thread(target=streams[-1].follow, args=(joint_watcher.stdout,), daemon=True).start()
+        wrenches = [stream for stream in streams if isinstance(stream.model, Wrench)]
 
         simulator = programs.start(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=run_env)
         # Read as it comes, so that a server with a lot to say never blocks on
@@ -2055,6 +2359,8 @@ def process(path, request):
                     # where the bodies are: 'before' is the first instant
                     # every stream has reached, which the next message is.
                     continue
+                if loads:
+                    fill_loads(reading, wrenches, inertials, gravity, warnings, 0.0, names, paused=True)
                 before = reading
                 first = message
                 running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
@@ -2070,6 +2376,8 @@ def process(path, request):
                 stream.forget_before(reading["time"])
             if next_sample is not None and reading["time"] >= next_sample and len(trace) < samples:
                 fill(reading, streams, warnings, patience(), names)
+                if loads:
+                    fill_loads(reading, wrenches, inertials, gravity, warnings, patience(), names)
                 trace.append(reading)
                 # Each sample is the first pose message at or past its instant
                 # that no sample before it took, at its own time: a step late,
@@ -2086,6 +2394,8 @@ def process(path, request):
         # the joint states of that instant may still be on their way. Unless it
         # is not, in which case what has arrived is all there will be.
         fill(after, streams, warnings, patience(), names)
+        if loads and after is not before:
+            fill_loads(after, wrenches, inertials, gravity, warnings, patience(), names)
         if samples and len(trace) < samples:
             note(
                 warnings,
@@ -2119,6 +2429,10 @@ def process(path, request):
     }
     if trace:
         result["samples"] = trace
+    if loads and names.parts:
+        # Which body each part is welded into and where it sits in it, out of
+        # the sidecar: what turns a body's loads into a part's.
+        result["parts"] = names.parts
     drawn = take_snapshots(path, request.get("snapshot"), scene_file, first, last, warnings)
     if drawn:
         result["snapshots"] = drawn
