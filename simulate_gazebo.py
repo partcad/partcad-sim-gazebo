@@ -1427,7 +1427,9 @@ def plan_wrenches(world, prefix, rate, warnings, names=AS_WRITTEN):
     a world PartCAD exported: a body's loads are stated in the
     world's frame, which takes the sidecar's bodies to place. A joint to the
     world, which Gazebo gives no sensor, and a joint of a static model, which
-    moves nothing, are passed over; the first is named in 'warnings'.
+    moves nothing, are passed over; the first is named in 'warnings', and so is
+    a joint whose child or parent link is none of the sidecar's bodies, which
+    would otherwise vanish from both ends' loads unremarked.
     """
     import gazebo_common
 
@@ -1443,9 +1445,17 @@ def plan_wrenches(world, prefix, rate, warnings, names=AS_WRITTEN):
         static = static or (model.findtext("static") or "").strip().lower() in ("true", "1")
         for joint in model.findall("joint") if not static else ():
             name = joint.get("name")
-            child = bodies.get(tuple(scoped) + tuple((joint.findtext("child") or "").strip().split("::")))
+            child_link = (joint.findtext("child") or "").strip()
+            child = bodies.get(tuple(scoped) + tuple(child_link.split("::")))
             parent_link = (joint.findtext("parent") or "").strip()
-            if not name or child is None:
+            if not name:
+                continue
+            if child is None:
+                note(
+                    warnings,
+                    "the load of joint '%s' is not reported: its child link, '%s', is none of the bodies the names"
+                    " file lists" % (names.joint("::".join(scoped), name) or name, child_link),
+                )
                 continue
             if parent_link == "world":
                 note(
@@ -1456,6 +1466,11 @@ def plan_wrenches(world, prefix, rate, warnings, names=AS_WRITTEN):
                 continue
             parent = bodies.get(tuple(scoped) + tuple(parent_link.split("::")))
             if parent is None:
+                note(
+                    warnings,
+                    "the load of joint '%s' is not reported: its parent link, '%s', is none of the bodies the names"
+                    " file lists" % (names.joint("::".join(scoped), name) or name, parent_link),
+                )
                 continue
             pose = joint.find("pose")
             if pose is not None and (pose.get("relative_to") or "").strip() not in ("", joint.findtext("child")):
@@ -1543,6 +1558,11 @@ def fill_loads(reading, streams, inertials, gravity, warnings, patience=PATIENCE
     'paused' is the first reading, taken while the world is paused: Gazebo's
     force-torque sensors measure nothing then, so that reading carries the
     weights alone, and says why.
+
+    A joint is stated about its child, so one whose child is not in the reading
+    is not reported at all, and one whose parent is not is reported on its child
+    alone; either is named in 'warnings' rather than left for a reader to take
+    for a joint passing nothing.
     """
     import urdf_common
 
@@ -1574,6 +1594,14 @@ def fill_loads(reading, streams, inertials, gravity, warnings, patience=PATIENCE
         sensor = stream.model
         child = bodies.get(sensor.child)
         if child is None:
+            # Its child is where the sensor measures, and the joint is stated
+            # at: without it there is nothing to turn the wrench by, on either
+            # side.
+            note(
+                warnings,
+                "the load of joint '%s' is not reported: its child body, '%s', is not in the reading"
+                % (sensor.reported, sensor.child),
+            )
             continue
         text = stream.at(reading["time"], patience)
         if text is None:
@@ -1608,6 +1636,12 @@ def fill_loads(reading, streams, inertials, gravity, warnings, patience=PATIENCE
                     "force": [-v for v in force],
                     "torque": [-v for v in torque],
                 }
+            )
+        else:
+            note(
+                warnings,
+                "the load of joint '%s' is reported on '%s' alone: its parent body, '%s', is not in the reading"
+                % (sensor.reported, sensor.child, sensor.parent),
             )
     for name, body in bodies.items():
         if name in weights or name in joints:
