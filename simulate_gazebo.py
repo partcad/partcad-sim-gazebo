@@ -613,19 +613,26 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 class Lines:
     """The end of what a program writes on a stream, read on a thread so the program never blocks on it."""
 
-    def __init__(self, stream, keep=STDERR_LINES):
+    def __init__(self, stream, keep=STDERR_LINES, watch=(NO_SYSTEMS,)):
+        """Read 'stream' on a thread, keeping its last 'keep' lines, and remembering for good which of the
+        texts in 'watch' any line has had in it: a line that matters is not lost to the lines after it."""
         self.kept = collections.deque(maxlen=keep)
+        self.watch = tuple(watch)
+        self.heard = set()
         self.thread = None
         if stream is not None and not isinstance(stream, (str, bytes)) and hasattr(stream, "__iter__"):
             self.thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
             self.thread.start()
 
     def _read(self, stream):
+        """Keep each line as it comes, without the colours, and note what 'watch' is waiting for."""
         try:
             for line in stream:
                 # Gazebo colours its console even into a pipe; a message
                 # quoted in a report is read, not displayed.
-                self.kept.append(_ANSI.sub("", line.rstrip("\n")))
+                line = _ANSI.sub("", line.rstrip("\n"))
+                self.heard.update(text for text in self.watch if text in line)
+                self.kept.append(line)
         except (OSError, ValueError):
             pass
 
@@ -636,8 +643,8 @@ class Lines:
         return "\n".join(line for line in list(self.kept) if line.strip())
 
     def says(self, text):
-        """Whether any line kept so far has 'text' in it."""
-        return any(text in line for line in list(self.kept))
+        """Whether any line so far has had 'text' in it: ever, for a text it watches; among those kept, else."""
+        return text in self.heard or any(text in line for line in list(self.kept))
 
 
 # What 'Messages.next' hands back once the stream has ended.

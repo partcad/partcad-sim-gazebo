@@ -207,6 +207,19 @@ def test_a_stream_that_said_nothing_is_no_messages_rather_than_one_empty_one():
     assert list(sim.messages([])) == []
 
 
+def test_a_server_that_said_it_loaded_no_systems_is_remembered_to_have_said_so():
+    """However much it writes after: a server's standard error is kept to its last lines, and the one that says
+    it will never publish a pose is the first."""
+    said = sim.Lines(
+        iter(["\x1b[1;31m[Err] [ServerConfig.cc:824] \x1b[0m%s\n" % sim.NO_SYSTEMS] + ["[Err] noise\n"] * 100)
+    )
+    said.thread.join(5)
+
+    assert sim.NO_SYSTEMS not in said.tail(0)
+    assert said.says(sim.NO_SYSTEMS)
+    assert not said.says("Unable to find or download file")
+
+
 def test_a_subscriber_replaced_is_heard_no_more_its_end_included():
     """The poses are subscribed to again when a running server sends none (see 'RESUBSCRIBE'): whatever the
     subscriber replaced had queued, and the end of it as it is stopped, is not the end of the one read now."""
