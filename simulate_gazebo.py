@@ -2690,11 +2690,22 @@ def process(path, request):
                 before = reading
                 first = message
                 running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
+                asked = 1
+                while not running and UNANSWERED in (answer or "") and asked < UNPAUSE_ATTEMPTS:
+                    # A service is found the way a topic is, and its
+                    # discovery datagrams are lost the same way (see
+                    # 'RESUBSCRIBE'); setting a world running twice is
+                    # setting it running once.
+                    if deadline.passed() or simulator.poll() is not None:
+                        break
+                    running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
+                    asked += 1
                 if not running:
                     raise Exception(
                         "Gazebo's server would not set world '%s' running: it was started paused, so that the first"
                         " reading is the world as loaded, and its control service ('%s service -s /world/%s/control')"
-                        " answered: %s" % (shown, server, world, answer or "nothing")
+                        " answered%s: %s"
+                        % (shown, server, world, " %d times" % asked if asked > 1 else "", answer or "nothing")
                     )
             after = reading
             last = message
@@ -2765,6 +2776,13 @@ def process(path, request):
     if warnings:
         result["warnings"] = warnings
     return result
+
+
+# What Harmonic's 'gz service' prints when nothing answered the call -- exiting
+# with status nought all the same -- and how many times the world's control
+# service is asked to set it running before a run gives up on it.
+UNANSWERED = "Service call timed out"
+UNPAUSE_ATTEMPTS = 3
 
 
 def unpause(server, world, environment, timeout):

@@ -30,7 +30,7 @@ What each one proves:
   wait, not the run;
 * a server whose control service will not set the world running fails the
   run, saying so -- a world is started paused, so that its first reading is
-  the world as loaded;
+  the world as loaded -- and a call nothing answered is made again;
 * and on every one of those ways out, every program is stopped -- the server,
   what it started, every subscriber -- and the world's copy is removed.
 
@@ -115,6 +115,11 @@ if args[:1] == ["sim"]:
     time.sleep(600)
 elif args[:1] == ["service"]:
     # The world's control service, which sets a world started paused running.
+    if mode == "timeout-once":
+        # A call whose discovery datagrams were lost: unanswered, the first time only.
+        with open(os.environ["FAKE_GZ_STATE"], "a") as f:
+            f.write("x")
+        mode = "timeout" if os.path.getsize(os.environ["FAKE_GZ_STATE"]) == 1 else "ok"
     if mode == "timeout":
         # What Harmonic's 'gz service' does when nothing answers: says so, and
         # exits with status nought.
@@ -143,7 +148,7 @@ elif args[:1] == ["topic"]:
             time.sleep(600)
         mode = "ok"
     if topic.endswith("/pose/info"):
-        if mode in ("ok", "silent-joints", "stuck", "timeout", "late-joints"):
+        if mode in ("ok", "silent-joints", "stuck", "timeout", "timeout-once", "late-joints"):
             for step in range(41):
                 pose(step * 0.025, 1.0 - step * 0.01)
                 time.sleep(0.005)
@@ -526,7 +531,20 @@ def test_a_control_service_that_does_not_answer_fails_the_run_though_it_exits_wi
     _, error, took = run(tmp_path)
 
     assert error is not None and took < 10
-    assert "would not set world 'w' running" in str(error) and "Service call timed out" in str(error)
+    assert "would not set world 'w' running" in str(error) and "answered 3 times: Service call timed out" in str(error)
+    assert len([args for args in _invocations(gazebo) if args[:1] == ["service"]]) == sim.UNPAUSE_ATTEMPTS
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_control_service_call_nothing_answered_is_made_again(gazebo, tmp_path):
+    """A service is found the way a topic is, and a call whose discovery datagrams were lost times out; asking
+    again sets the world running, which asking twice cannot do any harm to."""
+    gazebo("timeout-once")
+
+    result, error, _ = run(tmp_path)
+
+    assert error is None and result["reached"] >= 0.5
+    assert len([args for args in _invocations(gazebo) if args[:1] == ["service"]]) == 2
     assert_nothing_outlived_the_run(gazebo)
 
 

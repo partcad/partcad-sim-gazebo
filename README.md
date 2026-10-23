@@ -534,6 +534,9 @@ publishes in another transport partition. So nothing here waits blindly:
   pose at all ten seconds after its server started subscribes again, and again
   twice as long after that, inside `startup_timeout`. The world is paused until
   the first reading, so nothing is missed, and `warnings` says it happened.
+  A service is found the same way, so a call to the world's control service
+  that nothing answered is made again, up to three times, before the run
+  fails saying the world would not be set running.
 - **A first reading that does not come within `startup_timeout`** fails the
   run, saying which topic it listened on and in which partition, and what did
   come: a server whose joint states arrive and whose poses do not is running,
