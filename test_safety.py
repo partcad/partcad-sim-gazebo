@@ -22,6 +22,8 @@ What each one proves:
   naming the partition -- and one that runs and publishes joint states but no
   pose, or poses no first reading could be taken from, says that instead;
 * a server that says it loaded no systems fails the run at once;
+* poses that never reach a subscriber of a running server are subscribed to
+  again, and the run goes on;
 * a server that publishes and then dies fails the run saying how far it got;
 * a run that will not reach its 'duration' within its budget stops itself;
 * a subscriber that never hears a joint state costs a warning and a bounded
@@ -132,6 +134,14 @@ elif args[:1] == ["topic"]:
             )
             sys.stdout.flush()
             time.sleep(0.005)
+    if topic.endswith("/pose/info") and mode == "deaf-first":
+        # The first subscriber is one the server never registered: connected,
+        # and hearing nothing, for ever. The next one is heard.
+        with open(os.environ["FAKE_GZ_STATE"], "a") as f:
+            f.write("x")
+        if os.path.getsize(os.environ["FAKE_GZ_STATE"]) == 1:
+            time.sleep(600)
+        mode = "ok"
     if topic.endswith("/pose/info"):
         if mode in ("ok", "silent-joints", "stuck", "timeout", "late-joints"):
             for step in range(41):
@@ -183,6 +193,7 @@ def gazebo(tmp_path, monkeypatch):
     pids.mkdir()
     monkeypatch.setenv("PC_GZ", str(binary))
     monkeypatch.setenv("FAKE_GZ_PIDS", str(pids))
+    monkeypatch.setenv("FAKE_GZ_STATE", str(tmp_path / "subscribed"))
     monkeypatch.delenv("GZ_PARTITION", raising=False)
     monkeypatch.delenv("IGN_PARTITION", raising=False)
 
@@ -339,6 +350,41 @@ def test_poses_that_came_with_no_first_reading_are_counted_rather_than_called_no
     assert "no poses" not in message
     assert re.search(r"Gazebo published \d+ pose messages for world 'w' within 1 s of being started", message)
     assert "the joint states of model 'block' had only a later instant to give (t = 5 s)" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_poses_a_running_server_never_sends_are_subscribed_to_again(gazebo, tmp_path, monkeypatch):
+    """gz-transport registers a subscriber with its server once, in one UDP datagram, and one lost leaves the
+    subscriber hearing nothing for ever. A new one registers again; the world is paused, so nothing is missed."""
+    gazebo("deaf-first")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, took = run(tmp_path)
+
+    assert error is None and took < 10
+    assert result["before"]["time"] == 0.0 and result["reached"] >= 0.5
+    assert any("once the poses were subscribed to again (2 subscribers in all)" in w for w in result["warnings"])
+    subscribers = [args for args in _invocations(gazebo) if args[:1] == ["topic"] and args[-1].endswith("/pose/info")]
+    assert len(subscribers) == 2
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_server_that_hangs_is_subscribed_to_again_and_the_failure_counts_the_subscribers(
+    gazebo, tmp_path, monkeypatch
+):
+    """Each wait twice as long as the one before, and none of them past 'startup_timeout'."""
+    gazebo("hang")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.2)
+
+    _, error, took = run(tmp_path, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "nothing came on '/world/w/pose/info' in the transport partition" in message
+    subscribed = re.search(r"to any of the (\d+) subscribers it had", message)
+    assert subscribed and 2 <= int(subscribed.group(1)) <= 3
+    subscribers = [args for args in _invocations(gazebo) if args[:1] == ["topic"] and args[-1].endswith("/pose/info")]
+    assert len(subscribers) == int(subscribed.group(1))
     assert_nothing_outlived_the_run(gazebo)
 
 

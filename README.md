@@ -524,6 +524,16 @@ publishes in another transport partition. So nothing here waits blindly:
   `warnings`. A `GZ_SIM_SERVER_CONFIG_PATH` you have set is kept. A server that
   says it loaded no systems all the same fails the run at once, saying which
   configuration it read.
+- **Poses that never reach a running server's subscriber are subscribed to
+  again.** gz-transport registers a subscriber with the server publishing its
+  topic once, in one UDP datagram, when it first hears of that server, and a
+  machine running several servers at once drops such datagrams: every process
+  hears every other's discovery traffic, whatever its partition. A subscriber
+  whose registration was lost is connected and hears nothing, for ever, from a
+  server that is running and publishing to nobody. So a run that has had no
+  pose at all ten seconds after its server started subscribes again, and again
+  twice as long after that, inside `startup_timeout`. The world is paused until
+  the first reading, so nothing is missed, and `warnings` says it happened.
 - **A first reading that does not come within `startup_timeout`** fails the
   run, saying which topic it listened on and in which partition, and what did
   come: a server whose joint states arrive and whose poses do not is running,

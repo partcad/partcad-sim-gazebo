@@ -113,12 +113,14 @@ subscriber just goes on waiting, and so did this script, for ever. So what the
 server publishes is read on a thread of its own, and the run is checked while it
 waits: a server that has exited fails the run at once, with its exit status and
 the end of what it wrote (see 'Programs'); a server that says it loaded no
-systems fails it at once too ('no_systems'); a first reading that does not come
-within ``startup_timeout`` fails it saying where it was listening, how many
-poses came, and what each joint stream said ('no_first_reading'); and every
-wait -- for poses, for joint states, for the version -- is inside the run's
-budget, ``timeout``, which PartCAD hands every run and stops it at. This script
-stops a little before that, so that what it reports says how far the run got.
+systems fails it at once too ('no_systems'); poses that do not come to a
+running server's subscriber are subscribed to again ('RESUBSCRIBE'); a first
+reading that does not come within ``startup_timeout`` fails it saying where it
+was listening, how many poses came, and what each joint stream said
+('no_first_reading'); and every wait -- for poses, for joint states, for the
+version -- is inside the run's budget, ``timeout``, which PartCAD hands every
+run and stops it at. This script stops a little before that, so that what it
+reports says how far the run got.
 Every program it starts is in a process group of its own and is stopped with
 everything it started on every way out, and the world copy with it.
 """
@@ -453,6 +455,19 @@ BUDGET_MARGIN_MAX = 30.0
 # two minutes is one that will not.
 STARTUP_TIMEOUT = 120.0
 
+# How long the poses may say nothing before the first reading, in wall-clock
+# seconds, before they are subscribed to again -- and twice as long again each
+# time after that, inside 'startup_timeout'. gz-transport registers a
+# subscriber with the server publishing its topic once, in one UDP datagram,
+# when it first hears of that server; a datagram lost -- and a machine running
+# several servers at once drops them, every process hearing every other's
+# discovery traffic -- leaves a subscriber that is connected and hears nothing,
+# for ever, from a server that is running and publishing to nobody. A
+# subscriber started again registers again. Starting one while a slow server is
+# still loading the world costs nothing but the start: the world is paused
+# until the first reading, so no pose is missed.
+RESUBSCRIBE = 10.0
+
 # How often a wait looks up from the stream it is reading to check on the
 # server, in seconds.
 POLL = 0.25
@@ -630,16 +645,26 @@ class Messages:
     def __init__(self, stream):
         self.queue = queue.Queue()
         self.count = 0
+        self.current = None
+        self.follow(stream)
+
+    def follow(self, stream):
+        """Read 'stream' from now on, in place of the one before: what that one says after this is dropped,
+        its end included, which is the end of a subscriber this run stopped and not of the one it reads."""
+        self.current = stream
         threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
     def _read(self, stream):
         try:
             for text in messages(stream):
+                if stream is not self.current:
+                    return
                 self.queue.put(text)
         except (OSError, ValueError):
             pass
         finally:
-            self.queue.put(ENDED)
+            if stream is self.current:
+                self.queue.put(ENDED)
 
     def next(self, timeout):
         """The next message, ENDED once there will be no more, or None if 'timeout' passed first."""
@@ -780,7 +805,7 @@ def progress(world, before, after, count, duration):
     )
 
 
-def no_first_reading(world, topic, partition, waited, read, seen, streams, behind, tail):
+def no_first_reading(world, topic, partition, waited, read, seen, streams, behind, tail, subscriptions=1):
     """The failure a run with no first reading by its 'startup_timeout' fails with: what came, and what did not.
 
     'read' is how many pose messages came that named the bodies this run
@@ -790,6 +815,7 @@ def no_first_reading(world, topic, partition, waited, read, seen, streams, behin
     say tells a server that never loaded the world from one that is running
     and publishes no pose: joint states come from the same server, paused or
     not, and poses do not come at all from one with no scene broadcaster.
+    'subscriptions' is how many subscribers the poses had (see 'RESUBSCRIBE').
     """
     wrote = (" The server wrote:\n%s" % tail) if tail else ""
     if read:
@@ -812,7 +838,14 @@ def no_first_reading(world, topic, partition, waited, read, seen, streams, behin
         )
     head = (
         "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing to report:"
-        " nothing came on '%s' in the transport partition '%s'." % (world, waited, topic, partition)
+        " nothing came on '%s' in the transport partition '%s'%s."
+        % (
+            world,
+            waited,
+            topic,
+            partition,
+            " to any of the %d subscribers it had" % subscriptions if subscriptions > 1 else "",
+        )
     )
     spoke = [
         stream
@@ -2479,18 +2512,25 @@ def process(path, request):
     streams = []
     run_file = scene_file
     try:
+
+        def subscribe():
+            """A 'gz topic -e' for the poses, in this run's partition."""
+            return programs.start(
+                [server, topic_command, "-e", "-t", topic],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env=run_env,
+            )
+
         # The subscriber first. It is the thing that has to be listening before
         # the server starts publishing; the other way round loses the opening
         # reading, which is the one 'before' is.
-        watcher = programs.start(
-            [server, topic_command, "-e", "-t", topic],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            env=run_env,
-        )
+        watcher = subscribe()
         poses = Messages(watcher.stdout)
+        # How many subscribers the poses have had (see 'RESUBSCRIBE').
+        subscriptions = 1
 
         # The world as handed over, or a copy of it that publishes its joints.
         # Made inside the 'try' whose 'finally' removes it, so that nothing
@@ -2548,6 +2588,7 @@ def process(path, request):
         # run with no first reading says it had.
         seen = None
         behind = {}
+        resubscribe_at = waiting_since + RESUBSCRIBE
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""
@@ -2574,6 +2615,7 @@ def process(path, request):
                     streams,
                     behind,
                     said.tail(0),
+                    subscriptions,
                 )
             if deadline.passed():
                 return (
@@ -2609,6 +2651,16 @@ def process(path, request):
                             progress(shown, before, after, poses.count, duration),
                         )
                     )
+                if before is None and not poses.count and time.monotonic() >= resubscribe_at:
+                    # Not a word from a server that is still running: a
+                    # subscriber it may never have registered (see
+                    # 'RESUBSCRIBE'). The new one first and then the old one
+                    # stopped, so that nothing goes unheard between the two.
+                    stale, watcher = watcher, subscribe()
+                    poses.follow(watcher.stdout)
+                    _signal_group(stale, signal.SIGTERM)
+                    resubscribe_at = time.monotonic() + RESUBSCRIBE * 2**subscriptions
+                    subscriptions += 1
                 continue
             message = parse_message(text)
             reading = snapshot(message, names)
@@ -2626,6 +2678,15 @@ def process(path, request):
                     continue
                 if loads:
                     fill_loads(reading, wrenches, inertials, gravity, warnings, 0.0, names, paused=True)
+                if subscriptions > 1:
+                    note(
+                        warnings,
+                        "Gazebo published no pose to this run within %.0f s of its server being started, and did"
+                        " once the poses were subscribed to again (%d subscribers in all). A server slow to load the"
+                        " world looks like that, and so does one that never registered the first subscriber, which"
+                        " gz-transport does once, in one UDP datagram that a busy machine can lose"
+                        % (time.monotonic() - waiting_since, subscriptions),
+                    )
                 before = reading
                 first = message
                 running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
