@@ -19,7 +19,9 @@ What each one proves:
   where the run used to wait for that pose for ever;
 * a server that hangs while it starts, publishes where nobody is listening, or
   publishes messages that carry nothing, fails the run after 'startup_timeout',
-  naming the partition;
+  naming the partition -- and one that runs and publishes joint states but no
+  pose, or poses no first reading could be taken from, says that instead;
+* a server that says it loaded no systems fails the run at once;
 * a server that publishes and then dies fails the run saying how far it got;
 * a run that will not reach its 'duration' within its budget stops itself;
 * a subscriber that never hears a joint state costs a warning and a bounded
@@ -35,6 +37,7 @@ Each test takes a second or two. POSIX only: the fake is a script run by its
 """
 
 import os
+import re
 import sys
 import time
 from xml.etree import ElementTree
@@ -91,6 +94,14 @@ if args[:1] == ["sim"]:
     if mode == "die":
         sys.stderr.write("[Err] [Server.cc:123] Unable to find or download file\n")
         sys.exit(3)
+    if mode == "no-systems":
+        # What Harmonic writes, in its colours, when the server configuration
+        # it read is empty -- and then it runs on, with no systems.
+        sys.stderr.write(
+            "\x1b[1;31m[Err] [ServerConfig.cc:824] \x1b[0m\x1b[1;31m"
+            "No <server_config> element found when parsing plugins\x1b[0m\n"
+        )
+        sys.stderr.flush()
     # A server of its own, as 'gz sim' may start one.
     remember(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"]).pid)
     if mode == "publish-then-die":
@@ -110,8 +121,19 @@ elif args[:1] == ["service"]:
         print("data: false" if mode == "stuck" else "data: true")
 elif args[:1] == ["topic"]:
     topic = args[args.index("-t") + 1]
+    if "/joint_state/" in topic and mode in ("no-poses", "late-joints"):
+        # A joint-state message every step of a paused world: at its start, or
+        # -- for a subscriber that came up too late -- only ever a later step.
+        stamp = 5 if mode == "late-joints" else 0
+        for step in range(100000):
+            sys.stdout.write(
+                "header {\n  stamp {\n    sec: %%d\n  }\n}\nname: \"block\"\nid: 8\n"
+                "joint {\n  name: \"swing\"\n  id: 9\n  axis1 {\n    position: 0\n  }\n}\n" %% stamp
+            )
+            sys.stdout.flush()
+            time.sleep(0.005)
     if topic.endswith("/pose/info"):
-        if mode in ("ok", "silent-joints", "stuck", "timeout"):
+        if mode in ("ok", "silent-joints", "stuck", "timeout", "late-joints"):
             for step in range(41):
                 pose(step * 0.025, 1.0 - step * 0.01)
                 time.sleep(0.005)
@@ -273,6 +295,50 @@ def test_a_names_file_that_matches_no_pose_says_so_rather_than_that_nothing_came
     message = str(error)
     assert "none named the model and link of a body the names file" in message
     assert "export the world again" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_server_that_loaded_no_systems_fails_the_run_at_once_saying_why(gazebo, tmp_path):
+    """What kept CI's first runs waiting two minutes each: a server that read its configuration empty runs on,
+    paused, with no scene broadcaster, and publishes no pose however long it is given (see 'server_config')."""
+    gazebo("no-systems")
+
+    _, error, took = run(tmp_path, world=JOINTED, startup_timeout=60.0)
+
+    assert error is not None and took < 10
+    message = str(error)
+    assert "Gazebo's server for world 'w' loaded no systems" in message
+    assert "No <server_config> element found when parsing plugins" in message
+    assert "\x1b[" not in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_server_that_runs_and_publishes_no_pose_is_told_from_one_that_never_loaded(gazebo, tmp_path):
+    """Its joint states come, at the world's start, from the same server its poses do not: the failure says both."""
+    gazebo("no-poses")
+
+    _, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "published no poses for world 'w' within 1 s of being started" in message
+    assert re.search(r"it published \d+ joint states of model 'block', the latest at t = 0 s", message)
+    assert "scene broadcaster" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_poses_that_came_with_no_first_reading_are_counted_rather_than_called_none(gazebo, tmp_path):
+    """Poses came, and a joint stream never reached the instant of one: the failure counts the poses and names the
+    stream, where it used to say that Gazebo had published no poses at all."""
+    gazebo("late-joints")
+
+    _, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "no poses" not in message
+    assert re.search(r"Gazebo published \d+ pose messages for world 'w' within 1 s of being started", message)
+    assert "the joint states of model 'block' had only a later instant to give (t = 5 s)" in message
     assert_nothing_outlived_the_run(gazebo)
 
 

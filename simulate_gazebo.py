@@ -97,14 +97,25 @@ partition nobody else is in, so that two runs on one machine -- two worlds of
 the same name, which is every pair of runs of one simulation -- do not read
 each other's poses and joints; see 'run_environment'.
 
+**The systems a world runs with.** A world PartCAD exports names no systems
+of its own, so the server runs it with the ones its server configuration
+lists -- the physics, and the scene broadcaster every pose comes from. Gazebo
+keeps that in the home, copying it there the first time a server starts, and
+a server started beside the one copying it can read it empty and run with no
+systems: alive, paused, and publishing nothing. So a server is pointed at the
+installed configuration wherever the home has no copy yet; see
+'server_config'.
+
 **Nothing is waited for blindly.** A server that dies says nothing on the topic
 its subscriber is waiting on, and neither does a server that hangs while it
 starts, or one publishing in a partition nobody is listening in -- the
 subscriber just goes on waiting, and so did this script, for ever. So what the
 server publishes is read on a thread of its own, and the run is checked while it
 waits: a server that has exited fails the run at once, with its exit status and
-the end of what it wrote (see 'Programs'); a first message that does not come
-within ``startup_timeout`` fails it saying where it was listening; and every
+the end of what it wrote (see 'Programs'); a server that says it loaded no
+systems fails it at once too ('no_systems'); a first reading that does not come
+within ``startup_timeout`` fails it saying where it was listening, how many
+poses came, and what each joint stream said ('no_first_reading'); and every
 wait -- for poses, for joint states, for the version -- is inside the run's
 budget, ``timeout``, which PartCAD hands every run and stops it at. This script
 stops a little before that, so that what it reports says how far the run got.
@@ -297,6 +308,134 @@ def run_environment(environment=None, token=None):
     return result, partition
 
 
+# The variable a Gazebo since Garden reads its server configuration's path
+# from: the systems a world that names none of its own is run with.
+SERVER_CONFIG = "GZ_SIM_SERVER_CONFIG_PATH"
+
+# Where an installation keeps the server configuration it was built with: beside
+# the command files Gazebo's tool reads, one directory per release of the
+# simulator -- 'gz-sim8' is Harmonic's.
+INSTALLED_SERVER_CONFIG = os.path.join("gz-sim*", "server.config")
+
+# Where the tool looks for those when nothing says otherwise, after the
+# installation the server binary is in.
+SYSTEM_SHARES = ("/usr/share/gz", "/usr/local/share/gz")
+
+# What a server writes when the server configuration it read is no
+# configuration at all, and it is left with no systems (see 'server_config').
+NO_SYSTEMS = "No <server_config> element found when parsing plugins"
+
+
+def _release(path):
+    """The release a 'gz-sim<N>/server.config' is of, as a number to sort by."""
+    digits = re.search(r"(\d+)$", os.path.basename(os.path.dirname(path)))
+    return int(digits.group(1)) if digits else -1
+
+
+def installed_server_config(environment=None, server=None):
+    """The server configuration this Gazebo was installed with, or None.
+
+    Looked for in every directory 'GZ_CONFIG_PATH' names -- which is how a ROS
+    installation's setup script points Gazebo's tool at its vendor packages,
+    and how a workspace built from source does -- then in the 'share/gz' of
+    the installation the server binary is in, and in the system's own. The
+    newest release in the first that has any: the one 'gz sim' runs.
+    """
+    environment = os.environ if environment is None else environment
+    roots = [root for root in (environment.get("GZ_CONFIG_PATH") or "").split(os.pathsep) if root]
+    if server:
+        prefix = os.path.dirname(os.path.dirname(os.path.realpath(server)))
+        roots.append(os.path.join(prefix, "share", "gz"))
+    for root in roots + list(SYSTEM_SHARES):
+        found = [path for path in glob.glob(os.path.join(root, INSTALLED_SERVER_CONFIG)) if os.path.isfile(path)]
+        if found:
+            return max(found, key=_release)
+    return None
+
+
+def home_server_config(environment, installed):
+    """The copy of 'installed' a server reads by default: '~/.gz/sim/<release>/server.config'."""
+    home = environment.get("HOME") or environment.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.join(home, ".gz", "sim", str(_release(installed)), os.path.basename(installed))
+
+
+def is_server_config(path):
+    """Whether 'path' is a server configuration at all: XML whose root is '<server_config>'."""
+    try:
+        return ElementTree.parse(path).getroot().tag == "server_config"
+    except (OSError, ElementTree.ParseError):
+        return False
+
+
+def server_config(environment, server, warnings):
+    """The server configuration to start the server with, or None to leave the choice to Gazebo.
+
+    A world that names no systems of its own -- which is every world PartCAD
+    exports -- is run with the ones its server's configuration lists: the
+    physics, and the scene broadcaster every pose comes from. Unless
+    'GZ_SIM_SERVER_CONFIG_PATH' says where it is, a server reads it from
+    '~/.gz/sim/<release>/server.config', and the first server started in a
+    home where that is not there yet copies the installed one into it -- in
+    place, as 'std::filesystem::copy_file' does: the file is created, empty,
+    then filled. A second server started at the same moment finds it there,
+    reads nothing, writes "No <server_config> element found when parsing
+    plugins", and runs with no systems at all: paused, alive, and publishing
+    no pose, ever. A 'pc test' starts a package's simulations together, and
+    in a fresh home -- every CI job's -- that is how one or two of the first
+    of them hung for the whole of their 'startup_timeout'.
+
+    So where that copy is not there, the server is pointed at the installed
+    configuration itself, which it reads where it is: what Gazebo would have
+    copied, without the copy, and without writing one into the home either.
+    A copy that is there is a configuration somebody may have changed, and is
+    read as it always was -- unless it is no configuration at all, empty or
+    unreadable, which is what this race leaves behind when a copy is cut
+    short. That one is passed over for the installed one and named in
+    'warnings'. A configuration the environment already names is that
+    environment's choice and is kept, and an installation whose configuration
+    cannot be found is left to Gazebo; 'NO_SYSTEMS' is what says so if that
+    goes wrong (see 'no_systems').
+    """
+    if environment.get(SERVER_CONFIG):
+        return None
+    installed = installed_server_config(environment, server)
+    if installed is None:
+        return None
+    own = home_server_config(environment, installed)
+    if not os.path.exists(own):
+        return installed
+    if is_server_config(own):
+        return None
+    note(
+        warnings,
+        "'%s' is not a Gazebo server configuration -- it is empty or unreadable, which is what a server copying it"
+        " there leaves when it is cut short -- so this run's server was started with the installed one, '%s'."
+        " Remove it, and the next server started without one writes it again" % (own, installed),
+    )
+    return installed
+
+
+def no_systems(world, environment, installed_by_us, said):
+    """The failure a run whose server read a server configuration with nothing in it fails with."""
+    read = environment.get(SERVER_CONFIG)
+    if read and installed_by_us:
+        which = "the installed one, '%s', which this run started it with" % read
+    elif read:
+        which = "'%s', which %s names" % (read, SERVER_CONFIG)
+    else:
+        which = (
+            "its copy in '~/.gz/sim/<release>/server.config', which Gazebo copies there the first time a server"
+            " starts, and which a server that reads it while another is still writing it finds empty: remove it"
+            " if it is, and the next server started writes it again"
+        )
+    return (
+        "Gazebo's server for world '%s' loaded no systems, so it would never publish a pose: a world that names"
+        " none of its own runs with the ones its server configuration lists -- the physics, and the scene"
+        " broadcaster the poses come from -- and the configuration it read is none: %s. The server wrote:\n%s"
+        % (world, which, said.tail(0))
+    )
+
+
 # How long a run may take, in wall-clock seconds, when PartCAD does not say: the
 # bound this script always had. PartCAD hands every run its budget as 'timeout'.
 DEFAULT_TIMEOUT = 300.0
@@ -469,7 +608,11 @@ class Lines:
         """What has been kept, once the stream has had 'wait' seconds to finish."""
         if self.thread is not None:
             self.thread.join(wait)
-        return "\n".join(line for line in self.kept if line.strip())
+        return "\n".join(line for line in list(self.kept) if line.strip())
+
+    def says(self, text):
+        """Whether any line kept so far has 'text' in it."""
+        return any(text in line for line in list(self.kept))
 
 
 # What 'Messages.next' hands back once the stream has ended.
@@ -622,8 +765,13 @@ AS_WRITTEN = Names()
 
 def progress(world, before, after, count, duration):
     """What had been received when a run failed, for the message it fails with."""
-    if before is None:
+    if before is None and not count:
         return "No pose of world '%s' had been received." % world
+    if before is None:
+        return "%d pose messages of world '%s' had been received, and no first reading taken from any of them." % (
+            count,
+            world,
+        )
     return "%d pose messages of world '%s' had been received, the last at t = %.3g s of the %.3g s asked for." % (
         count,
         world,
@@ -632,12 +780,71 @@ def progress(world, before, after, count, duration):
     )
 
 
+def no_first_reading(world, topic, partition, waited, read, seen, streams, behind, tail):
+    """The failure a run with no first reading by its 'startup_timeout' fails with: what came, and what did not.
+
+    'read' is how many pose messages came that named the bodies this run
+    reads, 'seen' the instant of the latest of them, and 'behind' each joint
+    stream that had only a later state than that to give, by model, with the
+    time of it (see 'fill'). With no pose at all, what the joint streams did
+    say tells a server that never loaded the world from one that is running
+    and publishes no pose: joint states come from the same server, paused or
+    not, and poses do not come at all from one with no scene broadcaster.
+    """
+    wrote = (" The server wrote:\n%s" % tail) if tail else ""
+    if read:
+        return (
+            "Gazebo published %d pose messages for world '%s' within %.0f s of being started, the latest at t = %.3g"
+            " s, and no first reading could be taken from any of them: %s, so its joints would not have been where"
+            " its bodies were.%s"
+            % (
+                read,
+                world,
+                waited,
+                seen,
+                "; ".join(
+                    "the joint states of model '%s' had only a later instant to give (t = %.3g s)" % (model, stamp)
+                    for model, stamp in sorted(behind.items())
+                )
+                or "a joint stream had only a later instant to give",
+                wrote,
+            )
+        )
+    head = (
+        "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing to report:"
+        " nothing came on '%s' in the transport partition '%s'." % (world, waited, topic, partition)
+    )
+    spoke = [
+        stream
+        for stream in streams
+        if not isinstance(stream.model, Wrench) and not stream.model.links and getattr(stream, "count", 0)
+    ]
+    if spoke:
+        return (
+            "%s The server was running all the same: it published %s -- so it had loaded the world, and either runs"
+            " without the scene broadcaster poses come from, or never heard this run subscribe to them.%s"
+            % (
+                head,
+                "; ".join(
+                    "%d joint states of model '%s', the latest at t = %.3g s"
+                    % (stream.count, stream.model.shown, stream.newest or 0.0)
+                    for stream in spoke
+                ),
+                wrote,
+            )
+        )
+    return (
+        "%s A server that hangs while it loads the world, or one publishing in another partition, looks like this."
+        " Raise 'startup_timeout' if this machine is simply slow to start one.%s" % (head, wrote)
+    )
+
+
 def server_died(simulator, said, world, before, after, count, duration):
     """The failure a run whose server exited fails with."""
     head = (
         "Gazebo published no poses for world '%s': its server stopped before the first one (%s)."
         % (world, ended_how(simulator.poll()))
-        if before is None
+        if before is None and not count
         else "Gazebo's server stopped before the run was over (%s). %s"
         % (ended_how(simulator.poll()), progress(world, before, after, count, duration))
     )
@@ -1766,6 +1973,8 @@ class JointStream:
         self.model = model
         self.entries = collections.deque()
         self.newest = None
+        # How many messages have come, kept or not: what a failure says.
+        self.count = 0
         self.ended = False
         self.silent = False
         self.condition = threading.Condition()
@@ -1781,6 +1990,7 @@ class JointStream:
                 with self.condition:
                     self.entries.append((stamp, text))
                     self.newest = stamp
+                    self.count += 1
                     self.condition.notify_all()
         except (OSError, ValueError):
             # Closed under it, which is one of the ways a run ends.
@@ -2161,7 +2371,7 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
         reading["joints"][name] = kinematics.reading([entry], [rotation], None if rate is None else [rate])
 
 
-def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
+def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=None):
     """State in 'reading' where the joints of every stream were at its instant.
 
     'patience' is how long to wait for a stream that has not got that far yet
@@ -2173,7 +2383,9 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
     Returns whether every stream had a state of the reading's own instant or
     an earlier one to give: False where one began after it -- its subscriber
     came up a step or two after the server's first -- and gave a later
-    step's, which puts those joints a step from where the bodies are.
+    step's, which puts those joints a step from where the bodies are. Each
+    such stream is put in 'late', a dict, if one is given: its model's name,
+    and the time of the state it had to give instead.
     """
     links = {}
     in_step = True
@@ -2192,7 +2404,11 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
                 % stream.model.shown,
             )
             continue
-        in_step = in_step and message_time(text) <= reading["time"]
+        stamp = message_time(text)
+        if stamp > reading["time"]:
+            in_step = False
+            if late is not None:
+                late[stream.model.shown] = stamp
         reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
     posed_states(reading, names, links, warnings, patience)
     return in_step
@@ -2226,6 +2442,13 @@ def process(path, request):
     if loads and not names.bodies:
         note(warnings, "no loads are reported: they are read for a world PartCAD exported, with its names beside it")
         loads = False
+    # The configuration the server reads the systems of a world that names none
+    # from -- the physics, the scene broadcaster -- read where it is installed
+    # wherever Gazebo would otherwise copy it into the home first, which a
+    # server started beside this one could read half-written ('server_config').
+    configured = server_config(run_env, server, warnings)
+    if configured is not None:
+        run_env[SERVER_CONFIG] = configured
     # Before the server is started, because they are written into the file
     # the server loads: see 'world_gravity' and 'world_physics'.
     gravity = world_gravity(scene_file, request.get("gravity"))
@@ -2320,9 +2543,18 @@ def process(path, request):
         # Pose messages that came but named no body this run reads: with a
         # sidecar, ones in which no body's model and link appear once each.
         unread = 0
+        # The instant of the latest pose message that did name them, and each
+        # joint stream that had only a later state than that to give: what a
+        # run with no first reading says it had.
+        seen = None
+        behind = {}
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""
+            if before is None and said.says(NO_SYSTEMS):
+                # Not worth waiting for: a server with no systems publishes
+                # no pose however long it is given.
+                return no_systems(shown, run_env, configured is not None, said)
             if before is None and unread and names.bodies and time.monotonic() >= first_by:
                 return (
                     "Gazebo published %d pose messages for world '%s' within %.0f s of being started, and none"
@@ -2332,19 +2564,16 @@ def process(path, request):
                     % (unread, shown, time.monotonic() - waiting_since, scene_file)
                 )
             if before is None and time.monotonic() >= first_by:
-                tail = said.tail(0)
-                return (
-                    "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing"
-                    " to report: nothing came on '%s' in the transport partition '%s'. A server that hangs while"
-                    " it loads the world, or one publishing in another partition, looks like this. Raise"
-                    " 'startup_timeout' if this machine is simply slow to start one.%s"
-                    % (
-                        shown,
-                        time.monotonic() - waiting_since,
-                        topic,
-                        partition,
-                        (" The server wrote:\n%s" % tail) if tail else "",
-                    )
+                return no_first_reading(
+                    shown,
+                    topic,
+                    partition,
+                    time.monotonic() - waiting_since,
+                    poses.count - unread,
+                    seen,
+                    streams,
+                    behind,
+                    said.tail(0),
                 )
             if deadline.passed():
                 return (
@@ -2387,7 +2616,9 @@ def process(path, request):
                 unread += 1
                 continue
             if before is None:
-                if not fill(reading, streams, warnings, patience(), names):
+                seen = reading["time"]
+                behind.clear()
+                if not fill(reading, streams, warnings, patience(), names, behind):
                     # A joint stream that began after this instant has only a
                     # later step to give, so the joints would be a step from
                     # where the bodies are: 'before' is the first instant
