@@ -346,6 +346,10 @@ def installed_server_config(environment=None, server=None):
     """
     environment = os.environ if environment is None else environment
     roots = [root for root in (environment.get("GZ_CONFIG_PATH") or "").split(os.pathsep) if root]
+    # A bare name -- 'PC_GZ=gz' -- is a program on PATH, as it is to the
+    # 'Popen' that runs it, and not a file beside wherever this runs.
+    if server and not os.path.dirname(server):
+        server = shutil.which(server, path=environment.get("PATH"))
     if server:
         # The binary where it was found, and where it really is: a package
         # manager that links 'bin/gz' into a prefix of its own links 'share/gz'

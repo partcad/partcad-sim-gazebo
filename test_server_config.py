@@ -120,6 +120,20 @@ def test_a_linked_binary_is_looked_beside_where_it_was_found_too(tmp_path, nowhe
     assert found == str(tmp_path / "prefix" / "share" / "gz" / "gz-sim8" / "server.config")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="an executable here is a '#!' script; Windows finds programs by extension")
+def test_a_binary_named_by_its_name_alone_is_the_one_on_path(tmp_path, nowhere_else, monkeypatch):
+    """'PC_GZ=gz' names a program on PATH, which is what runs; not a 'gz' beside wherever this happens to run."""
+    installation(tmp_path / "usr" / "share" / "gz", 8)
+    (tmp_path / "usr" / "bin").mkdir()
+    (tmp_path / "usr" / "bin" / "gz").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "usr" / "bin" / "gz").chmod(0o755)
+    monkeypatch.chdir(tmp_path)
+
+    found = sim.installed_server_config({"PATH": str(tmp_path / "usr" / "bin")}, "gz")
+
+    assert found == str(tmp_path / "usr" / "share" / "gz" / "gz-sim8" / "server.config")
+
+
 def test_an_installation_with_none_is_none(tmp_path, nowhere_else):
     """And the choice is then left to Gazebo (see the tests below)."""
     (tmp_path / "share" / "gz").mkdir(parents=True)
