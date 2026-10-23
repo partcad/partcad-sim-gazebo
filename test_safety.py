@@ -536,6 +536,19 @@ def test_a_control_service_that_does_not_answer_fails_the_run_though_it_exits_wi
     assert_nothing_outlived_the_run(gazebo)
 
 
+def test_a_control_service_call_that_outlives_its_own_timeout_is_one_nothing_answered(monkeypatch):
+    """So it is made again like one, rather than failing the run at the first."""
+
+    def outlived(command, **kwargs):
+        raise sim.subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(sim.subprocess, "run", outlived)
+
+    running, answer = sim.unpause("gz", "w", None, 1.0)
+
+    assert running is False and sim.UNANSWERED in answer
+
+
 def test_a_control_service_call_nothing_answered_is_made_again(gazebo, tmp_path):
     """A service is found the way a topic is, and a call whose discovery datagrams were lost times out; asking
     again sets the world running, which asking twice cannot do any harm to."""

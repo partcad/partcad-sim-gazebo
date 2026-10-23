@@ -666,24 +666,32 @@ class Messages:
         threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
     def _read(self, stream):
-        """Queue every message of 'stream' while it is the one read, and its end if it ends as that one."""
+        """Queue every message of 'stream', and its end, each with the stream it came from."""
         try:
             for text in messages(stream):
                 if stream is not self.current:
                     return
-                self.queue.put(text)
+                self.queue.put((stream, text))
         except (OSError, ValueError):
             pass
         finally:
-            if stream is self.current:
-                self.queue.put(ENDED)
+            self.queue.put((stream, ENDED))
 
     def next(self, timeout):
-        """The next message, ENDED once there will be no more, or None if 'timeout' passed first."""
-        try:
-            text = self.queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        """The next message, ENDED once there will be no more, or None if 'timeout' passed first.
+
+        Only the stream being read is heard from: whatever one it replaced
+        ('follow') had queued before it was replaced, or says as it is
+        stopped, is passed over within the same 'timeout'.
+        """
+        until = time.monotonic() + timeout
+        while True:
+            try:
+                stream, text = self.queue.get(timeout=max(0.0, until - time.monotonic()))
+            except queue.Empty:
+                return None
+            if stream is self.current:
+                break
         if text is not ENDED:
             self.count += 1
         return text
@@ -2659,7 +2667,12 @@ def process(path, request):
             late = out_of_time()
             if late:
                 raise Exception(late)
-            text = poses.next(min(POLL, max(0.01, deadline.remaining())))
+            wait = min(POLL, max(0.01, deadline.remaining()))
+            if before is None:
+                # Nor past 'startup_timeout', which only the first reading
+                # is held to.
+                wait = min(wait, max(0.01, first_by - time.monotonic()))
+            text = poses.next(wait)
             if text is None or text is ENDED:
                 # Nothing new: the server is either working, or never will be.
                 if simulator.poll() is not None:
@@ -2836,6 +2849,10 @@ def unpause(server, world, environment, timeout):
         answer = subprocess.run(
             command, capture_output=True, text=True, timeout=max(1.0, timeout) + 5.0, env=environment
         )
+    except subprocess.TimeoutExpired as e:
+        # A 'gz service' that outlived its own '--timeout' is a call nothing
+        # answered too, and is made again like one.
+        return False, "%s (%s)" % (UNANSWERED, e)
     except (OSError, subprocess.SubprocessError) as e:
         return False, "%s: %s" % (type(e).__name__, e)
     said = ((answer.stdout or "") + (answer.stderr or "")).strip()

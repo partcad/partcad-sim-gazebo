@@ -26,6 +26,7 @@ Run it with `pytest`. It needs nothing but the standard library.
 
 import os
 import sys
+import time
 
 import pytest
 from xml.etree import ElementTree
@@ -204,6 +205,30 @@ def test_the_last_message_is_not_lost_at_the_end_of_the_stream():
 
 def test_a_stream_that_said_nothing_is_no_messages_rather_than_one_empty_one():
     assert list(sim.messages([])) == []
+
+
+def test_a_subscriber_replaced_is_heard_no_more_its_end_included():
+    """The poses are subscribed to again when a running server sends none (see 'RESUBSCRIBE'): whatever the
+    subscriber replaced had queued, and the end of it as it is stopped, is not the end of the one read now."""
+    replaced = (POSE_MESSAGE + POSE_MESSAGE.replace("sec: 3", "sec: 4")).splitlines(keepends=True)
+    poses = sim.Messages(iter(replaced))
+    # Its two messages and its end, queued before it is replaced.
+    deadline = time.monotonic() + 5
+    while poses.queue.qsize() < 3 and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert poses.queue.qsize() == 3
+    read, write = os.pipe()
+    with os.fdopen(read, encoding="utf-8") as current, os.fdopen(write, "w", encoding="utf-8") as feed:
+        poses.follow(current)
+        assert poses.next(0.2) is None
+        feed.write(POSE_MESSAGE.replace("sec: 3", "sec: 9") + POSE_MESSAGE)
+        feed.flush()
+        text = poses.next(5)
+        assert sim.snapshot(sim.parse_message(text))["time"] == pytest.approx(9.5)
+        feed.close()
+        assert sim.snapshot(sim.parse_message(poses.next(5)))["time"] == pytest.approx(3.5)
+        assert poses.next(5) is sim.ENDED
+    assert poses.count == 2
 
 
 #
