@@ -35,6 +35,15 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# PartCAD's sandbox contract, which a run imports ('gazebo_common' is written
+# against it), from the installed 'partcad' or from PYTHONPATH where there is
+# none -- as 'test_safety.py' finds it.
+try:
+    import partcad as pc
+
+    sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
+except ImportError:
+    pass
 
 import simulate_gazebo as sim  # noqa: E402
 
@@ -76,6 +85,7 @@ def test_it_is_found_where_gz_config_path_points_gazebos_tool(tmp_path, nowhere_
 
 
 def test_the_newest_release_is_the_one_gz_sim_runs(tmp_path, nowhere_else):
+    """By its number, not its spelling: 'gz-sim10' is newer than 'gz-sim8'."""
     share = installation(tmp_path / "share" / "gz", 7, 8, 10)
 
     found = sim.installed_server_config({"GZ_CONFIG_PATH": str(share)})
@@ -94,7 +104,24 @@ def test_without_gz_config_path_it_is_found_in_the_installation_the_server_is_in
     assert found == str(tmp_path / "usr" / "share" / "gz" / "gz-sim8" / "server.config")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="a symbolic link to a binary is how Homebrew installs one; not on Windows")
+def test_a_linked_binary_is_looked_beside_where_it_was_found_too(tmp_path, nowhere_else):
+    """Homebrew's way: 'bin/gz' and 'share/gz' linked into its prefix, the binary itself in a keg of the tool's
+    own that holds no simulator."""
+    keg = tmp_path / "Cellar" / "gz-tools2" / "bin"
+    keg.mkdir(parents=True)
+    (keg / "gz").write_text("", encoding="utf-8")
+    installation(tmp_path / "prefix" / "share" / "gz", 8)
+    (tmp_path / "prefix" / "bin").mkdir()
+    (tmp_path / "prefix" / "bin" / "gz").symlink_to(keg / "gz")
+
+    found = sim.installed_server_config({}, str(tmp_path / "prefix" / "bin" / "gz"))
+
+    assert found == str(tmp_path / "prefix" / "share" / "gz" / "gz-sim8" / "server.config")
+
+
 def test_an_installation_with_none_is_none(tmp_path, nowhere_else):
+    """And the choice is then left to Gazebo (see the tests below)."""
     (tmp_path / "share" / "gz").mkdir(parents=True)
 
     assert sim.installed_server_config({"GZ_CONFIG_PATH": str(tmp_path / "share" / "gz")}) is None
@@ -147,6 +174,7 @@ def test_a_copy_that_is_no_configuration_is_passed_over_and_named(tmp_path, nowh
 
 
 def test_a_configuration_the_environment_names_is_kept(tmp_path, nowhere_else):
+    """'GZ_SIM_SERVER_CONFIG_PATH' set by whoever runs this is their choice, and Gazebo reads it without copying."""
     share = installation(tmp_path / "share" / "gz", 8)
     environment = {"GZ_CONFIG_PATH": str(share), "HOME": str(tmp_path), sim.SERVER_CONFIG: "/theirs.config"}
 
@@ -154,6 +182,7 @@ def test_a_configuration_the_environment_names_is_kept(tmp_path, nowhere_else):
 
 
 def test_with_no_installed_configuration_the_choice_is_left_to_gazebo(tmp_path, nowhere_else):
+    """Nothing to point a server at: it reads its home's copy, as it always has."""
     assert sim.server_config({"HOME": str(tmp_path)}, None, []) is None
 
 
@@ -171,11 +200,13 @@ def test_the_server_is_started_with_it(monkeypatch, tmp_path, nowhere_else):
 
     class Recorded:
         def __init__(self, command, env=None, **_kwargs):
+            """Record what would have been started, and in what environment."""
             started.append((command, env))
             self.stdout = iter(())
             self.stderr = None
 
         def poll(self):
+            """Every program has already exited, which ends the run at its first wait."""
             return 0
 
     monkeypatch.setattr(sim.subprocess, "Popen", Recorded)
@@ -218,6 +249,7 @@ def gazebo(monkeypatch, tmp_path):
 
 
 def run(tmp_path, **request):
+    """'process' on a block in free fall, half a second of it."""
     (tmp_path / "scene.world").write_text(WORLD, encoding="utf-8")
     return sim.process(str(tmp_path), dict({"scene_file": str(tmp_path / "scene.world"), "duration": 0.5}, **request))
 

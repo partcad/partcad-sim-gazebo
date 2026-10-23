@@ -340,14 +340,20 @@ def installed_server_config(environment=None, server=None):
     Looked for in every directory 'GZ_CONFIG_PATH' names -- which is how a ROS
     installation's setup script points Gazebo's tool at its vendor packages,
     and how a workspace built from source does -- then in the 'share/gz' of
-    the installation the server binary is in, and in the system's own. The
-    newest release in the first that has any: the one 'gz sim' runs.
+    the installation the server binary is in, by the path it was found at and
+    by the one it really has, and in the system's own. The newest release in
+    the first that has any: the one 'gz sim' runs.
     """
     environment = os.environ if environment is None else environment
     roots = [root for root in (environment.get("GZ_CONFIG_PATH") or "").split(os.pathsep) if root]
     if server:
-        prefix = os.path.dirname(os.path.dirname(os.path.realpath(server)))
-        roots.append(os.path.join(prefix, "share", "gz"))
+        # The binary where it was found, and where it really is: a package
+        # manager that links 'bin/gz' into a prefix of its own links 'share/gz'
+        # there too, where the binary's own installation may hold no simulator.
+        for binary in (os.path.abspath(server), os.path.realpath(server)):
+            share = os.path.join(os.path.dirname(os.path.dirname(binary)), "share", "gz")
+            if share not in roots:
+                roots.append(share)
     for root in roots + list(SYSTEM_SHARES):
         found = [path for path in glob.glob(os.path.join(root, INSTALLED_SERVER_CONFIG)) if os.path.isfile(path)]
         if found:
@@ -643,6 +649,7 @@ class Messages:
     """
 
     def __init__(self, stream):
+        """Read the messages of 'stream' as they come; 'count' is how many 'next' has handed back."""
         self.queue = queue.Queue()
         self.count = 0
         self.current = None
@@ -655,6 +662,7 @@ class Messages:
         threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
     def _read(self, stream):
+        """Queue every message of 'stream' while it is the one read, and its end if it ends as that one."""
         try:
             for text in messages(stream):
                 if stream is not self.current:
@@ -2003,6 +2011,7 @@ class JointStream:
     """
 
     def __init__(self, model):
+        """The stream of one model's joints ('JointModel'), or of one joint's wrench ('Wrench'), with nothing yet."""
         self.model = model
         self.entries = collections.deque()
         self.newest = None
@@ -2448,6 +2457,16 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
 
 
 def process(path, request):
+    """Run the world 'request["scene_file"]' names in Gazebo and say where everything was before and after.
+
+    PartCAD's simulation entry point (see the docstring of this module, and
+    'wrapper_simulate' in PartCAD): 'path' is the directory a run may write
+    its snapshots into, and 'request' what PartCAD and the 'simulate:' ask
+    for -- 'duration', 'samples', 'timeout', 'startup_timeout', 'loads' and
+    the rest of the parameters 'partcad.yaml' lists. Returns the result
+    PartCAD hands a validation; raises, saying what happened, for a run that
+    could not be made.
+    """
     started = time.monotonic()
     (server, server_args, topic_command), environment = locate_gazebo()
     # What the server and every subscriber run in: this run's own partition.
