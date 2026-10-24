@@ -97,17 +97,30 @@ partition nobody else is in, so that two runs on one machine -- two worlds of
 the same name, which is every pair of runs of one simulation -- do not read
 each other's poses and joints; see 'run_environment'.
 
+**The systems a world runs with.** A world PartCAD exports names no systems
+of its own, so the server runs it with the ones its server configuration
+lists -- the physics, and the scene broadcaster every pose comes from. Gazebo
+keeps that in the home, copying it there the first time a server starts, and
+a server started beside the one copying it can read it empty and run with no
+systems: alive, paused, and publishing nothing. So a server is pointed at the
+installed configuration wherever the home has no copy yet; see
+'server_config'.
+
 **Nothing is waited for blindly.** A server that dies says nothing on the topic
 its subscriber is waiting on, and neither does a server that hangs while it
 starts, or one publishing in a partition nobody is listening in -- the
 subscriber just goes on waiting, and so did this script, for ever. So what the
 server publishes is read on a thread of its own, and the run is checked while it
 waits: a server that has exited fails the run at once, with its exit status and
-the end of what it wrote (see 'Programs'); a first message that does not come
-within ``startup_timeout`` fails it saying where it was listening; and every
-wait -- for poses, for joint states, for the version -- is inside the run's
-budget, ``timeout``, which PartCAD hands every run and stops it at. This script
-stops a little before that, so that what it reports says how far the run got.
+the end of what it wrote (see 'Programs'); a server that says it loaded no
+systems fails it at once too ('no_systems'); poses that do not come to a
+running server's subscriber are subscribed to again ('RESUBSCRIBE'); a first
+reading that does not come within ``startup_timeout`` fails it saying where it
+was listening, how many poses came, and what each joint stream said
+('no_first_reading'); and every wait -- for poses, for joint states, for the
+version -- is inside the run's budget, ``timeout``, which PartCAD hands every
+run and stops it at. This script stops a little before that, so that what it
+reports says how far the run got.
 Every program it starts is in a process group of its own and is stopped with
 everything it started on every way out, and the world copy with it.
 """
@@ -297,6 +310,144 @@ def run_environment(environment=None, token=None):
     return result, partition
 
 
+# The variable a Gazebo since Garden reads its server configuration's path
+# from: the systems a world that names none of its own is run with.
+SERVER_CONFIG = "GZ_SIM_SERVER_CONFIG_PATH"
+
+# Where an installation keeps the server configuration it was built with: beside
+# the command files Gazebo's tool reads, one directory per release of the
+# simulator -- 'gz-sim8' is Harmonic's.
+INSTALLED_SERVER_CONFIG = os.path.join("gz-sim*", "server.config")
+
+# Where the tool looks for those when nothing says otherwise, after the
+# installation the server binary is in.
+SYSTEM_SHARES = ("/usr/share/gz", "/usr/local/share/gz")
+
+# What a server writes when the server configuration it read is no
+# configuration at all, and it is left with no systems (see 'server_config').
+NO_SYSTEMS = "No <server_config> element found when parsing plugins"
+
+
+def _release(path):
+    """The release a 'gz-sim<N>/server.config' is of, as a number to sort by."""
+    digits = re.search(r"(\d+)$", os.path.basename(os.path.dirname(path)))
+    return int(digits.group(1)) if digits else -1
+
+
+def installed_server_config(environment=None, server=None):
+    """The server configuration this Gazebo was installed with, or None.
+
+    Looked for in every directory 'GZ_CONFIG_PATH' names -- which is how a ROS
+    installation's setup script points Gazebo's tool at its vendor packages,
+    and how a workspace built from source does -- then in the 'share/gz' of
+    the installation the server binary is in, by the path it was found at and
+    by the one it really has, and in the system's own. The newest release in
+    the first that has any: the one 'gz sim' runs.
+    """
+    environment = os.environ if environment is None else environment
+    roots = [root for root in (environment.get("GZ_CONFIG_PATH") or "").split(os.pathsep) if root]
+    # A bare name -- 'PC_GZ=gz' -- is a program on PATH, as it is to the
+    # 'Popen' that runs it, and not a file beside wherever this runs.
+    if server and not os.path.dirname(server):
+        server = shutil.which(server, path=environment.get("PATH"))
+    if server:
+        # The binary where it was found, and where it really is: a package
+        # manager that links 'bin/gz' into a prefix of its own links 'share/gz'
+        # there too, where the binary's own installation may hold no simulator.
+        for binary in (os.path.abspath(server), os.path.realpath(server)):
+            share = os.path.join(os.path.dirname(os.path.dirname(binary)), "share", "gz")
+            if share not in roots:
+                roots.append(share)
+    for root in roots + list(SYSTEM_SHARES):
+        found = [path for path in glob.glob(os.path.join(root, INSTALLED_SERVER_CONFIG)) if os.path.isfile(path)]
+        if found:
+            return max(found, key=_release)
+    return None
+
+
+def home_server_config(environment, installed):
+    """The copy of 'installed' a server reads by default: '~/.gz/sim/<release>/server.config'."""
+    home = environment.get("HOME") or environment.get("USERPROFILE") or os.path.expanduser("~")
+    return os.path.join(home, ".gz", "sim", str(_release(installed)), os.path.basename(installed))
+
+
+def is_server_config(path):
+    """Whether 'path' is a server configuration at all: XML whose root is '<server_config>'."""
+    try:
+        return ElementTree.parse(path).getroot().tag == "server_config"
+    except (OSError, ElementTree.ParseError):
+        return False
+
+
+def server_config(environment, server, warnings):
+    """The server configuration to start the server with, or None to leave the choice to Gazebo.
+
+    A world that names no systems of its own -- which is every world PartCAD
+    exports -- is run with the ones its server's configuration lists: the
+    physics, and the scene broadcaster every pose comes from. Unless
+    'GZ_SIM_SERVER_CONFIG_PATH' says where it is, a server reads it from
+    '~/.gz/sim/<release>/server.config', and the first server started in a
+    home where that is not there yet copies the installed one into it -- in
+    place, as 'std::filesystem::copy_file' does: the file is created, empty,
+    then filled. A second server started at the same moment finds it there,
+    reads nothing, writes "No <server_config> element found when parsing
+    plugins", and runs with no systems at all: paused, alive, and publishing
+    no pose, ever. A 'pc test' starts a package's simulations together, and
+    in a fresh home -- every CI job's -- that is how one or two of the first
+    of them hung for the whole of their 'startup_timeout'.
+
+    So where that copy is not there, the server is pointed at the installed
+    configuration itself, which it reads where it is: what Gazebo would have
+    copied, without the copy, and without writing one into the home either.
+    A copy that is there is a configuration somebody may have changed, and is
+    read as it always was -- unless it is no configuration at all, empty or
+    unreadable, which is what this race leaves behind when a copy is cut
+    short. That one is passed over for the installed one and named in
+    'warnings'. A configuration the environment already names is that
+    environment's choice and is kept, and an installation whose configuration
+    cannot be found is left to Gazebo; 'NO_SYSTEMS' is what says so if that
+    goes wrong (see 'no_systems').
+    """
+    if environment.get(SERVER_CONFIG):
+        return None
+    installed = installed_server_config(environment, server)
+    if installed is None:
+        return None
+    own = home_server_config(environment, installed)
+    if not os.path.exists(own):
+        return installed
+    if is_server_config(own):
+        return None
+    note(
+        warnings,
+        "'%s' is not a Gazebo server configuration -- it is empty or unreadable, which is what a server copying it"
+        " there leaves when it is cut short -- so this run's server was started with the installed one, '%s'."
+        " Remove it, and the next server started without one writes it again" % (own, installed),
+    )
+    return installed
+
+
+def no_systems(world, environment, installed_by_us, said):
+    """The failure a run whose server read a server configuration with nothing in it fails with."""
+    read = environment.get(SERVER_CONFIG)
+    if read and installed_by_us:
+        which = "the installed one, '%s', which this run started it with" % read
+    elif read:
+        which = "'%s', which %s names" % (read, SERVER_CONFIG)
+    else:
+        which = (
+            "its copy in '~/.gz/sim/<release>/server.config', which Gazebo copies there the first time a server"
+            " starts, and which a server that reads it while another is still writing it finds empty: remove it"
+            " if it is, and the next server started writes it again"
+        )
+    return (
+        "Gazebo's server for world '%s' loaded no systems, so it would never publish a pose: a world that names"
+        " none of its own runs with the ones its server configuration lists -- the physics, and the scene"
+        " broadcaster the poses come from -- and the configuration it read is none: %s. The server wrote:\n%s"
+        % (world, which, said.tail(0))
+    )
+
+
 # How long a run may take, in wall-clock seconds, when PartCAD does not say: the
 # bound this script always had. PartCAD hands every run its budget as 'timeout'.
 DEFAULT_TIMEOUT = 300.0
@@ -313,6 +464,19 @@ BUDGET_MARGIN_MAX = 30.0
 # a first start in a container, take seconds; a server that has said nothing in
 # two minutes is one that will not.
 STARTUP_TIMEOUT = 120.0
+
+# How long the poses may say nothing before the first reading, in wall-clock
+# seconds, before they are subscribed to again -- and twice as long again each
+# time after that, inside 'startup_timeout'. gz-transport registers a
+# subscriber with the server publishing its topic once, in one UDP datagram,
+# when it first hears of that server; a datagram lost -- and a machine running
+# several servers at once drops them, every process hearing every other's
+# discovery traffic -- leaves a subscriber that is connected and hears nothing,
+# for ever, from a server that is running and publishing to nobody. A
+# subscriber started again registers again. Starting one while a slow server is
+# still loading the world costs nothing but the start: the world is paused
+# until the first reading, so no pose is missed.
+RESUBSCRIBE = 10.0
 
 # How often a wait looks up from the stream it is reading to check on the
 # server, in seconds.
@@ -449,19 +613,26 @@ _ANSI = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
 class Lines:
     """The end of what a program writes on a stream, read on a thread so the program never blocks on it."""
 
-    def __init__(self, stream, keep=STDERR_LINES):
+    def __init__(self, stream, keep=STDERR_LINES, watch=(NO_SYSTEMS,)):
+        """Read 'stream' on a thread, keeping its last 'keep' lines, and remembering for good which of the
+        texts in 'watch' any line has had in it: a line that matters is not lost to the lines after it."""
         self.kept = collections.deque(maxlen=keep)
+        self.watch = tuple(watch)
+        self.heard = set()
         self.thread = None
         if stream is not None and not isinstance(stream, (str, bytes)) and hasattr(stream, "__iter__"):
             self.thread = threading.Thread(target=self._read, args=(stream,), daemon=True)
             self.thread.start()
 
     def _read(self, stream):
+        """Keep each line as it comes, without the colours, and note what 'watch' is waiting for."""
         try:
             for line in stream:
                 # Gazebo colours its console even into a pipe; a message
                 # quoted in a report is read, not displayed.
-                self.kept.append(_ANSI.sub("", line.rstrip("\n")))
+                line = _ANSI.sub("", line.rstrip("\n"))
+                self.heard.update(text for text in self.watch if text in line)
+                self.kept.append(line)
         except (OSError, ValueError):
             pass
 
@@ -469,7 +640,11 @@ class Lines:
         """What has been kept, once the stream has had 'wait' seconds to finish."""
         if self.thread is not None:
             self.thread.join(wait)
-        return "\n".join(line for line in self.kept if line.strip())
+        return "\n".join(line for line in list(self.kept) if line.strip())
+
+    def says(self, text):
+        """Whether any line so far has had 'text' in it: ever, for a text it watches; among those kept, else."""
+        return text in self.heard or any(text in line for line in list(self.kept))
 
 
 # What 'Messages.next' hands back once the stream has ended.
@@ -485,25 +660,45 @@ class Messages:
     """
 
     def __init__(self, stream):
+        """Read the messages of 'stream' as they come; 'count' is how many 'next' has handed back."""
         self.queue = queue.Queue()
         self.count = 0
+        self.current = None
+        self.follow(stream)
+
+    def follow(self, stream):
+        """Read 'stream' from now on, in place of the one before: what that one says after this is dropped,
+        its end included, which is the end of a subscriber this run stopped and not of the one it reads."""
+        self.current = stream
         threading.Thread(target=self._read, args=(stream,), daemon=True).start()
 
     def _read(self, stream):
+        """Queue every message of 'stream', and its end, each with the stream it came from."""
         try:
             for text in messages(stream):
-                self.queue.put(text)
+                if stream is not self.current:
+                    return
+                self.queue.put((stream, text))
         except (OSError, ValueError):
             pass
         finally:
-            self.queue.put(ENDED)
+            self.queue.put((stream, ENDED))
 
     def next(self, timeout):
-        """The next message, ENDED once there will be no more, or None if 'timeout' passed first."""
-        try:
-            text = self.queue.get(timeout=timeout)
-        except queue.Empty:
-            return None
+        """The next message, ENDED once there will be no more, or None if 'timeout' passed first.
+
+        Only the stream being read is heard from: whatever one it replaced
+        ('follow') had queued before it was replaced, or says as it is
+        stopped, is passed over within the same 'timeout'.
+        """
+        until = time.monotonic() + timeout
+        while True:
+            try:
+                stream, text = self.queue.get(timeout=max(0.0, until - time.monotonic()))
+            except queue.Empty:
+                return None
+            if stream is self.current:
+                break
         if text is not ENDED:
             self.count += 1
         return text
@@ -622,8 +817,13 @@ AS_WRITTEN = Names()
 
 def progress(world, before, after, count, duration):
     """What had been received when a run failed, for the message it fails with."""
-    if before is None:
+    if before is None and not count:
         return "No pose of world '%s' had been received." % world
+    if before is None:
+        return "%d pose messages of world '%s' had been received, and no first reading taken from any of them." % (
+            count,
+            world,
+        )
     return "%d pose messages of world '%s' had been received, the last at t = %.3g s of the %.3g s asked for." % (
         count,
         world,
@@ -632,12 +832,79 @@ def progress(world, before, after, count, duration):
     )
 
 
+def no_first_reading(world, topic, partition, waited, read, seen, streams, behind, tail, subscriptions=1):
+    """The failure a run with no first reading by its 'startup_timeout' fails with: what came, and what did not.
+
+    'read' is how many pose messages came that named the bodies this run
+    reads, 'seen' the instant of the latest of them, and 'behind' each joint
+    stream that had only a later state than that to give, by model, with the
+    time of it (see 'fill'). With no pose at all, what the joint streams did
+    say tells a server that never loaded the world from one that is running
+    and publishes no pose: joint states come from the same server, paused or
+    not, and poses do not come at all from one with no scene broadcaster.
+    'subscriptions' is how many subscribers the poses had (see 'RESUBSCRIBE').
+    """
+    wrote = (" The server wrote:\n%s" % tail) if tail else ""
+    if read:
+        return (
+            "Gazebo published %d pose messages for world '%s' within %.0f s of being started, the latest at t = %.3g"
+            " s, and no first reading could be taken from any of them: %s, so its joints would not have been where"
+            " its bodies were.%s"
+            % (
+                read,
+                world,
+                waited,
+                seen,
+                "; ".join(
+                    "the joint states of model '%s' had only a later instant to give (t = %.3g s)" % (model, stamp)
+                    for model, stamp in sorted(behind.items())
+                )
+                or "a joint stream had only a later instant to give",
+                wrote,
+            )
+        )
+    head = (
+        "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing to report:"
+        " nothing came on '%s' in the transport partition '%s'%s."
+        % (
+            world,
+            waited,
+            topic,
+            partition,
+            " to any of the %d subscribers it had" % subscriptions if subscriptions > 1 else "",
+        )
+    )
+    spoke = [
+        stream
+        for stream in streams
+        if not isinstance(stream.model, Wrench) and not stream.model.links and getattr(stream, "count", 0)
+    ]
+    if spoke:
+        return (
+            "%s The server was running all the same: it published %s -- so it had loaded the world, and either runs"
+            " without the scene broadcaster poses come from, or never heard this run subscribe to them.%s"
+            % (
+                head,
+                "; ".join(
+                    "%d joint states of model '%s', the latest at t = %.3g s"
+                    % (stream.count, stream.model.shown, stream.newest or 0.0)
+                    for stream in spoke
+                ),
+                wrote,
+            )
+        )
+    return (
+        "%s A server that hangs while it loads the world, or one publishing in another partition, looks like this."
+        " Raise 'startup_timeout' if this machine is simply slow to start one.%s" % (head, wrote)
+    )
+
+
 def server_died(simulator, said, world, before, after, count, duration):
     """The failure a run whose server exited fails with."""
     head = (
         "Gazebo published no poses for world '%s': its server stopped before the first one (%s)."
         % (world, ended_how(simulator.poll()))
-        if before is None
+        if before is None and not count
         else "Gazebo's server stopped before the run was over (%s). %s"
         % (ended_how(simulator.poll()), progress(world, before, after, count, duration))
     )
@@ -1763,9 +2030,12 @@ class JointStream:
     """
 
     def __init__(self, model):
+        """The stream of one model's joints ('JointModel'), or of one joint's wrench ('Wrench'), with nothing yet."""
         self.model = model
         self.entries = collections.deque()
         self.newest = None
+        # How many messages have come, kept or not: what a failure says.
+        self.count = 0
         self.ended = False
         self.silent = False
         self.condition = threading.Condition()
@@ -1781,6 +2051,7 @@ class JointStream:
                 with self.condition:
                     self.entries.append((stamp, text))
                     self.newest = stamp
+                    self.count += 1
                     self.condition.notify_all()
         except (OSError, ValueError):
             # Closed under it, which is one of the ways a run ends.
@@ -2161,7 +2432,7 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
         reading["joints"][name] = kinematics.reading([entry], [rotation], None if rate is None else [rate])
 
 
-def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
+def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=None):
     """State in 'reading' where the joints of every stream were at its instant.
 
     'patience' is how long to wait for a stream that has not got that far yet
@@ -2173,7 +2444,9 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
     Returns whether every stream had a state of the reading's own instant or
     an earlier one to give: False where one began after it -- its subscriber
     came up a step or two after the server's first -- and gave a later
-    step's, which puts those joints a step from where the bodies are.
+    step's, which puts those joints a step from where the bodies are. Each
+    such stream is put in 'late', a dict, if one is given: its model's name,
+    and the time of the state it had to give instead.
     """
     links = {}
     in_step = True
@@ -2192,13 +2465,27 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN):
                 % stream.model.shown,
             )
             continue
-        in_step = in_step and message_time(text) <= reading["time"]
+        stamp = message_time(text)
+        if stamp > reading["time"]:
+            in_step = False
+            if late is not None:
+                late[stream.model.shown] = stamp
         reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
     posed_states(reading, names, links, warnings, patience)
     return in_step
 
 
 def process(path, request):
+    """Run the world 'request["scene_file"]' names in Gazebo and say where everything was before and after.
+
+    PartCAD's simulation entry point (see the docstring of this module, and
+    'wrapper_simulate' in PartCAD): 'path' is the directory a run may write
+    its snapshots into, and 'request' what PartCAD and the 'simulate:' ask
+    for -- 'duration', 'samples', 'timeout', 'startup_timeout', 'loads' and
+    the rest of the parameters 'partcad.yaml' lists. Returns the result
+    PartCAD hands a validation; raises, saying what happened, for a run that
+    could not be made.
+    """
     started = time.monotonic()
     (server, server_args, topic_command), environment = locate_gazebo()
     # What the server and every subscriber run in: this run's own partition.
@@ -2226,6 +2513,13 @@ def process(path, request):
     if loads and not names.bodies:
         note(warnings, "no loads are reported: they are read for a world PartCAD exported, with its names beside it")
         loads = False
+    # The configuration the server reads the systems of a world that names none
+    # from -- the physics, the scene broadcaster -- read where it is installed
+    # wherever Gazebo would otherwise copy it into the home first, which a
+    # server started beside this one could read half-written ('server_config').
+    configured = server_config(run_env, server, warnings)
+    if configured is not None:
+        run_env[SERVER_CONFIG] = configured
     # Before the server is started, because they are written into the file
     # the server loads: see 'world_gravity' and 'world_physics'.
     gravity = world_gravity(scene_file, request.get("gravity"))
@@ -2256,18 +2550,25 @@ def process(path, request):
     streams = []
     run_file = scene_file
     try:
+
+        def subscribe():
+            """A 'gz topic -e' for the poses, in this run's partition."""
+            return programs.start(
+                [server, topic_command, "-e", "-t", topic],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                bufsize=1,
+                env=run_env,
+            )
+
         # The subscriber first. It is the thing that has to be listening before
         # the server starts publishing; the other way round loses the opening
         # reading, which is the one 'before' is.
-        watcher = programs.start(
-            [server, topic_command, "-e", "-t", topic],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            bufsize=1,
-            env=run_env,
-        )
+        watcher = subscribe()
         poses = Messages(watcher.stdout)
+        # How many subscribers the poses have had (see 'RESUBSCRIBE').
+        subscriptions = 1
 
         # The world as handed over, or a copy of it that publishes its joints.
         # Made inside the 'try' whose 'finally' removes it, so that nothing
@@ -2320,9 +2621,19 @@ def process(path, request):
         # Pose messages that came but named no body this run reads: with a
         # sidecar, ones in which no body's model and link appear once each.
         unread = 0
+        # The instant of the latest pose message that did name them, and each
+        # joint stream that had only a later state than that to give: what a
+        # run with no first reading says it had.
+        seen = None
+        behind = {}
+        resubscribe_at = waiting_since + RESUBSCRIBE
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""
+            if before is None and said.says(NO_SYSTEMS):
+                # Not worth waiting for: a server with no systems publishes
+                # no pose however long it is given.
+                return no_systems(shown, run_env, configured is not None, said)
             if before is None and unread and names.bodies and time.monotonic() >= first_by:
                 return (
                     "Gazebo published %d pose messages for world '%s' within %.0f s of being started, and none"
@@ -2332,19 +2643,17 @@ def process(path, request):
                     % (unread, shown, time.monotonic() - waiting_since, scene_file)
                 )
             if before is None and time.monotonic() >= first_by:
-                tail = said.tail(0)
-                return (
-                    "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing"
-                    " to report: nothing came on '%s' in the transport partition '%s'. A server that hangs while"
-                    " it loads the world, or one publishing in another partition, looks like this. Raise"
-                    " 'startup_timeout' if this machine is simply slow to start one.%s"
-                    % (
-                        shown,
-                        time.monotonic() - waiting_since,
-                        topic,
-                        partition,
-                        (" The server wrote:\n%s" % tail) if tail else "",
-                    )
+                return no_first_reading(
+                    shown,
+                    topic,
+                    partition,
+                    time.monotonic() - waiting_since,
+                    poses.count - unread,
+                    seen,
+                    streams,
+                    behind,
+                    said.tail(0),
+                    subscriptions,
                 )
             if deadline.passed():
                 return (
@@ -2365,7 +2674,12 @@ def process(path, request):
             late = out_of_time()
             if late:
                 raise Exception(late)
-            text = poses.next(min(POLL, max(0.01, deadline.remaining())))
+            wait = min(POLL, max(0.01, deadline.remaining()))
+            if before is None:
+                # Nor past 'startup_timeout', which only the first reading
+                # is held to.
+                wait = min(wait, max(0.01, first_by - time.monotonic()))
+            text = poses.next(wait)
             if text is None or text is ENDED:
                 # Nothing new: the server is either working, or never will be.
                 if simulator.poll() is not None:
@@ -2380,6 +2694,16 @@ def process(path, request):
                             progress(shown, before, after, poses.count, duration),
                         )
                     )
+                if before is None and not poses.count and time.monotonic() >= resubscribe_at:
+                    # Not a word from a server that is still running: a
+                    # subscriber it may never have registered (see
+                    # 'RESUBSCRIBE'). The new one first and then the old one
+                    # stopped, so that nothing goes unheard between the two.
+                    stale, watcher = watcher, subscribe()
+                    poses.follow(watcher.stdout)
+                    _signal_group(stale, signal.SIGTERM)
+                    resubscribe_at = time.monotonic() + RESUBSCRIBE * 2**subscriptions
+                    subscriptions += 1
                 continue
             message = parse_message(text)
             reading = snapshot(message, names)
@@ -2387,7 +2711,9 @@ def process(path, request):
                 unread += 1
                 continue
             if before is None:
-                if not fill(reading, streams, warnings, patience(), names):
+                seen = reading["time"]
+                behind.clear()
+                if not fill(reading, streams, warnings, patience(), names, behind):
                     # A joint stream that began after this instant has only a
                     # later step to give, so the joints would be a step from
                     # where the bodies are: 'before' is the first instant
@@ -2395,14 +2721,34 @@ def process(path, request):
                     continue
                 if loads:
                     fill_loads(reading, wrenches, inertials, gravity, warnings, 0.0, names, paused=True)
+                if subscriptions > 1:
+                    note(
+                        warnings,
+                        "Gazebo published no pose to this run within %.0f s of its server being started, and did"
+                        " once the poses were subscribed to again (%d subscribers in all). A server slow to load the"
+                        " world looks like that, and so does one that never registered the first subscriber, which"
+                        " gz-transport does once, in one UDP datagram that a busy machine can lose"
+                        % (time.monotonic() - waiting_since, subscriptions),
+                    )
                 before = reading
                 first = message
                 running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
+                asked = 1
+                while not running and UNANSWERED in (answer or "") and asked < UNPAUSE_ATTEMPTS:
+                    # A service is found the way a topic is, and its
+                    # discovery datagrams are lost the same way (see
+                    # 'RESUBSCRIBE'); setting a world running twice is
+                    # setting it running once.
+                    if deadline.passed() or simulator.poll() is not None:
+                        break
+                    running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))
+                    asked += 1
                 if not running:
                     raise Exception(
                         "Gazebo's server would not set world '%s' running: it was started paused, so that the first"
                         " reading is the world as loaded, and its control service ('%s service -s /world/%s/control')"
-                        " answered: %s" % (shown, server, world, answer or "nothing")
+                        " answered%s: %s"
+                        % (shown, server, world, " %d times" % asked if asked > 1 else "", answer or "nothing")
                     )
             after = reading
             last = message
@@ -2475,6 +2821,13 @@ def process(path, request):
     return result
 
 
+# What Harmonic's 'gz service' prints when nothing answered the call -- exiting
+# with status nought all the same -- and how many times the world's control
+# service is asked to set it running before a run gives up on it.
+UNANSWERED = "Service call timed out"
+UNPAUSE_ATTEMPTS = 3
+
+
 def unpause(server, world, environment, timeout):
     """Set the world in the server running, which it was started without; '(it did, what it said)'.
 
@@ -2503,6 +2856,10 @@ def unpause(server, world, environment, timeout):
         answer = subprocess.run(
             command, capture_output=True, text=True, timeout=max(1.0, timeout) + 5.0, env=environment
         )
+    except subprocess.TimeoutExpired as e:
+        # A 'gz service' that outlived its own '--timeout' is a call nothing
+        # answered too, and is made again like one.
+        return False, "%s (%s)" % (UNANSWERED, e)
     except (OSError, subprocess.SubprocessError) as e:
         return False, "%s: %s" % (type(e).__name__, e)
     said = ((answer.stdout or "") + (answer.stderr or "")).strip()

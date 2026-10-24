@@ -500,8 +500,49 @@ publishes in another transport partition. So nothing here waits blindly:
   [Err] [Server.cc:86] Error Code 9: Msg: Failed to load a world.
   ```
 
-- **A first pose that does not come within `startup_timeout`** fails the run,
-  saying which topic it listened on and in which partition.
+- **A server that loaded no systems fails the run at once.** A world PartCAD
+  exports names no systems of its own, so the server runs it with the ones its
+  server configuration lists -- the physics, and the scene broadcaster every
+  pose comes from. Gazebo keeps that configuration in
+  `~/.gz/sim/<release>/server.config`, copying the installed one there the
+  first time a server starts, in place: the file exists, empty, before its
+  content is in it. A second server started at that moment -- `pc test`
+  starting a package's simulations together in a home Gazebo has not written
+  to yet, which is every CI job's first -- reads it empty and runs paused,
+  alive, and publishing nothing, and the run used to wait its whole
+  `startup_timeout` for a pose and say that none had come:
+
+  ```text
+  [Err] [ServerConfig.cc:824] No <server_config> element found when parsing plugins
+  ```
+
+  So where the home has no copy yet, the server is started with the installed
+  configuration itself (`GZ_SIM_SERVER_CONFIG_PATH`) and reads it where it is:
+  nothing is copied, so there is nothing to read half-written. A copy that is
+  there is read as it always was, unless it is no configuration at all --
+  what a copy cut short leaves -- which is passed over and named in
+  `warnings`. A `GZ_SIM_SERVER_CONFIG_PATH` you have set is kept. A server that
+  says it loaded no systems all the same fails the run at once, saying which
+  configuration it read.
+- **Poses that never reach a running server's subscriber are subscribed to
+  again.** gz-transport registers a subscriber with the server publishing its
+  topic once, in one UDP datagram, when it first hears of that server, and a
+  machine running several servers at once drops such datagrams: every process
+  hears every other's discovery traffic, whatever its partition. A subscriber
+  whose registration was lost is connected and hears nothing, for ever, from a
+  server that is running and publishing to nobody. So a run that has had no
+  pose at all ten seconds after its server started subscribes again, and again
+  twice as long after that, inside `startup_timeout`. The world is paused until
+  the first reading, so nothing is missed, and `warnings` says it happened.
+  A service is found the same way, so a call to the world's control service
+  that nothing answered is made again, up to three times, before the run
+  fails saying the world would not be set running.
+- **A first reading that does not come within `startup_timeout`** fails the
+  run, saying which topic it listened on and in which partition, and what did
+  come: a server whose joint states arrive and whose poses do not is running,
+  and has no scene broadcaster or never heard the run subscribe; pose messages
+  that came with no first reading taken from them are counted, and each joint
+  stream that had only a later instant to give is named.
 - **Every wait is inside the run's budget**, `timeout`: for poses, for joint
   states (each joint stream is waited for at most ten seconds, and once for one
   that has said nothing), and for `gz sim --versions`. PartCAD hands every run
@@ -616,8 +657,9 @@ pytest
 
 `test_safety.py` proves each of the nets in "When a run goes wrong" with a fake
 `gz` -- a few lines of Python found through `PC_GZ` -- that dies before its first
-pose, hangs while it starts, publishes and then dies, or is too slow for its
-budget, and checks that every program it was run as is gone afterwards. It needs
+pose, hangs while it starts, says it loaded no systems, publishes joint states
+and no pose, publishes and then dies, or is too slow for its budget, and checks
+that every program it was run as is gone afterwards. It needs
 nothing but the standard library and a POSIX system. Its last test runs a world a
 real Gazebo refuses, and is skipped without one, like the ones below.
 
@@ -689,6 +731,14 @@ PartCAD's own joint puts it, and the last runs the same scene in MuJoCo as well
 and holds the two engines to one pose. That one needs a checkout of
 [partcad-sim-mujoco](https://github.com/partcad/partcad-sim-mujoco) named by
 `PC_SIM_MUJOCO`, and `mujoco` installed, and is skipped otherwise.
+
+`test_server_config.py` checks which server configuration a run's server is
+started with -- the installed one where the home has no copy, the home's where
+it has one, and the installed one again where that copy is empty -- against
+directories standing for an installation and a home, with nothing but the
+standard library. Its last tests need a Gazebo: a run in a fresh home leaves no
+copy in it, and a run in a home holding an empty one, which is what a server
+started beside the one copying it reads, reaches its duration.
 
 `test_partition.py` checks the environment each run starts its programs in, with
 nothing but the standard library, and then runs two worlds of one name side by

@@ -19,14 +19,18 @@ What each one proves:
   where the run used to wait for that pose for ever;
 * a server that hangs while it starts, publishes where nobody is listening, or
   publishes messages that carry nothing, fails the run after 'startup_timeout',
-  naming the partition;
+  naming the partition -- and one that runs and publishes joint states but no
+  pose, or poses no first reading could be taken from, says that instead;
+* a server that says it loaded no systems fails the run at once;
+* poses that never reach a subscriber of a running server are subscribed to
+  again, and the run goes on;
 * a server that publishes and then dies fails the run saying how far it got;
 * a run that will not reach its 'duration' within its budget stops itself;
 * a subscriber that never hears a joint state costs a warning and a bounded
   wait, not the run;
 * a server whose control service will not set the world running fails the
   run, saying so -- a world is started paused, so that its first reading is
-  the world as loaded;
+  the world as loaded -- and a call nothing answered is made again;
 * and on every one of those ways out, every program is stopped -- the server,
   what it started, every subscriber -- and the world's copy is removed.
 
@@ -35,6 +39,7 @@ Each test takes a second or two. POSIX only: the fake is a script run by its
 """
 
 import os
+import re
 import sys
 import time
 from xml.etree import ElementTree
@@ -91,6 +96,14 @@ if args[:1] == ["sim"]:
     if mode == "die":
         sys.stderr.write("[Err] [Server.cc:123] Unable to find or download file\n")
         sys.exit(3)
+    if mode == "no-systems":
+        # What Harmonic writes, in its colours, when the server configuration
+        # it read is empty -- and then it runs on, with no systems.
+        sys.stderr.write(
+            "\x1b[1;31m[Err] [ServerConfig.cc:824] \x1b[0m\x1b[1;31m"
+            "No <server_config> element found when parsing plugins\x1b[0m\n"
+        )
+        sys.stderr.flush()
     # A server of its own, as 'gz sim' may start one.
     remember(subprocess.Popen([sys.executable, "-c", "import time; time.sleep(600)"]).pid)
     if mode == "publish-then-die":
@@ -102,6 +115,11 @@ if args[:1] == ["sim"]:
     time.sleep(600)
 elif args[:1] == ["service"]:
     # The world's control service, which sets a world started paused running.
+    if mode == "timeout-once":
+        # A call whose discovery datagrams were lost: unanswered, the first time only.
+        with open(os.environ["FAKE_GZ_STATE"], "a") as f:
+            f.write("x")
+        mode = "timeout" if os.path.getsize(os.environ["FAKE_GZ_STATE"]) == 1 else "ok"
     if mode == "timeout":
         # What Harmonic's 'gz service' does when nothing answers: says so, and
         # exits with status nought.
@@ -110,8 +128,27 @@ elif args[:1] == ["service"]:
         print("data: false" if mode == "stuck" else "data: true")
 elif args[:1] == ["topic"]:
     topic = args[args.index("-t") + 1]
+    if "/joint_state/" in topic and mode in ("no-poses", "late-joints"):
+        # A joint-state message every step of a paused world: at its start, or
+        # -- for a subscriber that came up too late -- only ever a later step.
+        stamp = 5 if mode == "late-joints" else 0
+        for step in range(100000):
+            sys.stdout.write(
+                "header {\n  stamp {\n    sec: %%d\n  }\n}\nname: \"block\"\nid: 8\n"
+                "joint {\n  name: \"swing\"\n  id: 9\n  axis1 {\n    position: 0\n  }\n}\n" %% stamp
+            )
+            sys.stdout.flush()
+            time.sleep(0.005)
+    if topic.endswith("/pose/info") and mode == "deaf-first":
+        # The first subscriber is one the server never registered: connected,
+        # and hearing nothing, for ever. The next one is heard.
+        with open(os.environ["FAKE_GZ_STATE"], "a") as f:
+            f.write("x")
+        if os.path.getsize(os.environ["FAKE_GZ_STATE"]) == 1:
+            time.sleep(600)
+        mode = "ok"
     if topic.endswith("/pose/info"):
-        if mode in ("ok", "silent-joints", "stuck", "timeout"):
+        if mode in ("ok", "silent-joints", "stuck", "timeout", "timeout-once", "late-joints"):
             for step in range(41):
                 pose(step * 0.025, 1.0 - step * 0.01)
                 time.sleep(0.005)
@@ -161,6 +198,7 @@ def gazebo(tmp_path, monkeypatch):
     pids.mkdir()
     monkeypatch.setenv("PC_GZ", str(binary))
     monkeypatch.setenv("FAKE_GZ_PIDS", str(pids))
+    monkeypatch.setenv("FAKE_GZ_STATE", str(tmp_path / "subscribed"))
     monkeypatch.delenv("GZ_PARTITION", raising=False)
     monkeypatch.delenv("IGN_PARTITION", raising=False)
 
@@ -273,6 +311,85 @@ def test_a_names_file_that_matches_no_pose_says_so_rather_than_that_nothing_came
     message = str(error)
     assert "none named the model and link of a body the names file" in message
     assert "export the world again" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_server_that_loaded_no_systems_fails_the_run_at_once_saying_why(gazebo, tmp_path):
+    """What kept CI's first runs waiting two minutes each: a server that read its configuration empty runs on,
+    paused, with no scene broadcaster, and publishes no pose however long it is given (see 'server_config')."""
+    gazebo("no-systems")
+
+    _, error, took = run(tmp_path, world=JOINTED, startup_timeout=60.0)
+
+    assert error is not None and took < 10
+    message = str(error)
+    assert "Gazebo's server for world 'w' loaded no systems" in message
+    assert "No <server_config> element found when parsing plugins" in message
+    assert "\x1b[" not in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_server_that_runs_and_publishes_no_pose_is_told_from_one_that_never_loaded(gazebo, tmp_path):
+    """Its joint states come, at the world's start, from the same server its poses do not: the failure says both."""
+    gazebo("no-poses")
+
+    _, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "published no poses for world 'w' within 1 s of being started" in message
+    assert re.search(r"it published \d+ joint states of model 'block', the latest at t = 0 s", message)
+    assert "scene broadcaster" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_poses_that_came_with_no_first_reading_are_counted_rather_than_called_none(gazebo, tmp_path):
+    """Poses came, and a joint stream never reached the instant of one: the failure counts the poses and names the
+    stream, where it used to say that Gazebo had published no poses at all."""
+    gazebo("late-joints")
+
+    _, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "no poses" not in message
+    assert re.search(r"Gazebo published \d+ pose messages for world 'w' within 1 s of being started", message)
+    assert "the joint states of model 'block' had only a later instant to give (t = 5 s)" in message
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_poses_a_running_server_never_sends_are_subscribed_to_again(gazebo, tmp_path, monkeypatch):
+    """gz-transport registers a subscriber with its server once, in one UDP datagram, and one lost leaves the
+    subscriber hearing nothing for ever. A new one registers again; the world is paused, so nothing is missed."""
+    gazebo("deaf-first")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, took = run(tmp_path)
+
+    assert error is None and took < 10
+    assert result["before"]["time"] == 0.0 and result["reached"] >= 0.5
+    assert any("once the poses were subscribed to again (2 subscribers in all)" in w for w in result["warnings"])
+    subscribers = [args for args in _invocations(gazebo) if args[:1] == ["topic"] and args[-1].endswith("/pose/info")]
+    assert len(subscribers) == 2
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_server_that_hangs_is_subscribed_to_again_and_the_failure_counts_the_subscribers(
+    gazebo, tmp_path, monkeypatch
+):
+    """Each wait twice as long as the one before, and none of them past 'startup_timeout'."""
+    gazebo("hang")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.2)
+
+    _, error, took = run(tmp_path, startup_timeout=1.0)
+
+    assert error is not None and 1.0 <= took < 5
+    message = str(error)
+    assert "nothing came on '/world/w/pose/info' in the transport partition" in message
+    subscribed = re.search(r"to any of the (\d+) subscribers it had", message)
+    assert subscribed and 2 <= int(subscribed.group(1)) <= 3
+    subscribers = [args for args in _invocations(gazebo) if args[:1] == ["topic"] and args[-1].endswith("/pose/info")]
+    assert len(subscribers) == int(subscribed.group(1))
     assert_nothing_outlived_the_run(gazebo)
 
 
@@ -414,7 +531,33 @@ def test_a_control_service_that_does_not_answer_fails_the_run_though_it_exits_wi
     _, error, took = run(tmp_path)
 
     assert error is not None and took < 10
-    assert "would not set world 'w' running" in str(error) and "Service call timed out" in str(error)
+    assert "would not set world 'w' running" in str(error) and "answered 3 times: Service call timed out" in str(error)
+    assert len([args for args in _invocations(gazebo) if args[:1] == ["service"]]) == sim.UNPAUSE_ATTEMPTS
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_control_service_call_that_outlives_its_own_timeout_is_one_nothing_answered(monkeypatch):
+    """So it is made again like one, rather than failing the run at the first."""
+
+    def outlived(command, **kwargs):
+        raise sim.subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(sim.subprocess, "run", outlived)
+
+    running, answer = sim.unpause("gz", "w", None, 1.0)
+
+    assert running is False and sim.UNANSWERED in answer
+
+
+def test_a_control_service_call_nothing_answered_is_made_again(gazebo, tmp_path):
+    """A service is found the way a topic is, and a call whose discovery datagrams were lost times out; asking
+    again sets the world running, which asking twice cannot do any harm to."""
+    gazebo("timeout-once")
+
+    result, error, _ = run(tmp_path)
+
+    assert error is None and result["reached"] >= 0.5
+    assert len([args for args in _invocations(gazebo) if args[:1] == ["service"]]) == 2
     assert_nothing_outlived_the_run(gazebo)
 
 
