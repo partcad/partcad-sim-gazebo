@@ -675,6 +675,24 @@ def test_a_shape_used_twice_is_written_once(export_world, tmp_path):
     ]
 
 
+def test_everything_written_besides_the_world_is_said_so_partcad_can_cache_it(export_world, tmp_path):
+    """'files' is what PartCAD caches an export with, and puts back under the name asked for next.
+
+    Relative to the world's directory, and named after the world: the meshes
+    under '<stem>_meshes/', and the sidecar of names when one is asked for.
+    """
+    cube = envelope("//p:cube", "cube", b"CUBE")
+    root = {"name": "//p:bench", "label": "bench", "kind": "scene", "assembly": [cube]}
+
+    result, _ = exported(export_world, tmp_path / "bench.world", root)
+    assert result["files"] == ["bench_meshes/cube.stl"]
+
+    result, _ = exported(export_world, tmp_path / "bench.world", root, names_file=True)
+    assert result["files"] == ["bench_meshes/cube.stl", "bench.world.names.json"]
+    for name in result["files"]:
+        assert os.path.isfile(str(tmp_path / name))
+
+
 # A part and an assembly may share a full name -- the assembly 'nut' that holds
 # the part 'nut' -- and the core keys the assembly's entry under its kind as
 # well wherever they do ('kinematics.properties_key', partcad/partcad#809).

@@ -1308,6 +1308,13 @@ def process(path, request):
         f.write('<?xml version="1.0" ?>\n')
         f.write(ElementTree.tostring(sdf, encoding="unicode"))
         f.write("\n")
+    meshes = sorted(set(state["meshes"].values()))
+    # What was written besides 'path', relative to its directory: what lets
+    # PartCAD cache this export and put it back whole (its 'files' result key).
+    # Every name begins the way 'path' does - 'room.world' writes
+    # 'room_meshes/...' and 'room.world.names.json' - which is what lets a cached
+    # world be put back under another name.
+    files = list(meshes)
     if request.get("names_file"):
         naming.write_sidecar(
             path,
@@ -1316,6 +1323,7 @@ def process(path, request):
             planner.bodies(),
             dict(planner.reported),
         )
+        files.append(os.path.basename(naming.sidecar_path(path)))
     else:
         naming.remove_sidecar(path)
 
@@ -1324,7 +1332,8 @@ def process(path, request):
         "exception": None,
         "world_name": world_name,
         "mesh_dir": mesh_dir,
-        "meshes": sorted(set(state["meshes"].values())),
+        "meshes": meshes,
+        "files": files,
         "warnings": warnings,
         # Properties PartCAD holds and SDFormat cannot state. Reported at info
         # level by the caller: nothing is wrong with the file, it just says less
