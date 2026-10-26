@@ -449,6 +449,9 @@ So it is found in this order:
   which is then the second case. It is published for linux/amd64 and
   linux/arm64, each built natively, as one tag: OSRF's own
   `osrf/ros:jazzy-simulation`, which it is built the way of, is amd64 alone.
+  Its Python is Ubuntu Noble's 3.12, which `pythonVersion` beside
+  `dockerImage` says, so that the environment PartCAD builds in it is for
+  the version that is there.
 
 `PC_GZ` names an installation `PATH` does not know about. A machine with none of
 these is told which way to arrange one, rather than shown a traceback.

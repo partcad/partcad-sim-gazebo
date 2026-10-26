@@ -380,6 +380,13 @@ simulation:
     # script (see 'ros_environment'). Jazzy is the long-term support release,
     # and pairs with Harmonic.
     dockerImage: ghcr.io/partcad/partcad-sim-gazebo:latest
+    # The Python that image carries: Ubuntu Noble's python3, 3.12. A package
+    # that states none is given PartCAD's default, 3.11, and the environment is
+    # built with the image's own interpreter -- so under 'useDockerRemote',
+    # where it is built inside the container and checked, a run was refused for
+    # the mismatch. A machine on another sandbox gets a 3.12 environment too;
+    # this script runs on any Python PartCAD supports.
+    pythonVersion: "3.12"
     # What this script imports beyond the standard library: numpy draws the
     # snapshots (see 'snapshot_raster.py'). A sandbox's environment does not see
     # the numpy the image may have of its own.
