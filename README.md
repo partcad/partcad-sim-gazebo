@@ -429,6 +429,45 @@ world file otherwise.
 A picture that cannot be drawn is a warning, never a failed run: the verdict
 does not depend on it.
 
+## Video
+
+PartCAD also asks every run for a video of the whole of it, from the same
+viewpoint, at the frame rate and the size it names — 25 frames a second, and
+1280×720 unless the machine's `simulation.videoResolution` says otherwise:
+
+```json
+"video": {"format": "webm", "file": "video.webm", "fps": 25, "width": 1280, "height": 720,
+          "viewport_origin": [100, -100, 100], "viewport_up": [0, 0, 1]}
+```
+
+A frame is due every 1/25 s of simulated time, from the start of the run to
+its end, so the video plays the run in real time: 251 frames for the default
+ten seconds. Each one is the first pose message Gazebo published at or past its
+instant — sixty come a second, so a frame is never more than a sixtieth of a
+second late — and a message after a gap stands for every frame the gap held.
+Only the poses of each are kept while Gazebo runs; the frames are drawn from
+them once the run is over, out of the world file, by the same CPU renderer as
+the snapshots, and framed alike on everything any of them holds. They are
+encoded as WebM with VP9 in it — the pairing every browser plays, the Visual
+Studio Code webview the PartCAD IDE draws in included, which plays no H.264 —
+by the FFmpeg the `imageio-ffmpeg` wheel carries, which is why that is among
+this simulation's `pythonRequirements`. The file goes into the run directory
+beside the snapshots, and is reported as
+
+```json
+{"video": "video.webm"}
+```
+
+It is what the IDE's **Validation → Simulation** tab plays, with the before
+and after pictures as the still it shows until it is played.
+
+Drawing the frames is a few seconds for a small world, on up to four threads,
+with the floor drawn once for all of them and a frame drawing again only what
+moved. It never costs the run its answer: it is drawn last, inside what is left
+of the run's budget, and one that would not be finished in time is given up,
+as is one that cannot be drawn or encoded on this machine, with a warning
+saying why.
+
 ## Where Gazebo comes from
 
 Not from pip — there is no wheel that carries a Gazebo. That is the one way this
@@ -667,9 +706,11 @@ nothing but the standard library and a POSIX system. Its last test runs a world 
 real Gazebo refuses, and is skipped without one, like the ones below.
 
 `test_simulate_gazebo.py` needs nothing but the standard library and says why an
-end-to-end run is not among what it checks. `test_snapshot.py` needs numpy, and
-`partcad` for the half that reads a world: it places one by pose messages a real
-`gz topic -e` printed. `test_world.py` needs `partcad`
+end-to-end run is not among what it checks. `test_snapshot.py` needs numpy,
+`imageio-ffmpeg` for the videos, and `partcad` for the half that reads a world:
+it places one by pose messages a real `gz topic -e` printed, and films it by a
+stream of them. Its tests of the renderer are the MuJoCo plugin's, over the
+same file. `test_world.py` needs `partcad`
 installed: the reader and the writer are written against the sandbox contract
 that lives there — `ocp_serialize`, `urdf_common`, `mass_properties` and
 `primitive_shapes` — and the tests import them the same way a sandbox does. CI

@@ -390,8 +390,15 @@ simulation:
     # What this script imports beyond the standard library: numpy draws the
     # snapshots (see 'snapshot_raster.py'). A sandbox's environment does not see
     # the numpy the image may have of its own.
+    #
+    # And FFmpeg, for the video of the run PartCAD asks for: the one the
+    # `imageio-ffmpeg` wheel carries, a program rather than a Python module,
+    # with a wheel for every platform a sandbox runs on and no Python version
+    # of its own. Only the program is used (see 'Encoder' in
+    # 'snapshot_raster.py'), so any release that ships one will do.
     pythonRequirements:
       - numpy
+      - imageio-ffmpeg>=0.5,<1
     # How long, in seconds of simulated time. Ten is long enough for something
     # that is going to fall over to have fallen over and come to rest.
     duration: 10.0
@@ -441,6 +448,13 @@ simulation:
     # are taken from (the scene's own 'render: png:' viewpoint) in the request.
     # They are drawn on the CPU out of the world file and the pose messages; see
     # 'snapshot_raster.py' for why not with Gazebo's own renderer.
+    #
+    # Nor is the video of the run PartCAD asks for beside them: its frame rate,
+    # its size and where it is taken from are the request's too. It is drawn
+    # the same way, from the pose message of each frame's instant, once the run
+    # is over, and encoded as WebM by FFmpeg -- the requirement above that it
+    # adds. One that cannot be made in what is left of the run's budget is a
+    # warning, not a failure.
 
 open:
   gazebo:
