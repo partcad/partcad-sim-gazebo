@@ -58,6 +58,9 @@ jobs:
           # The simulation gets it from its `pythonRequirements`; the `partcad`
           # wheel does not bring it.
           python -m pip install numpy
+          # And the FFmpeg the video of a run is encoded with, as the
+          # simulation's `pythonRequirements` asks the sandbox for it.
+          python -m pip install "imageio-ffmpeg>=0.5,<1"
 
       - name: Run the tests
         run: pytest -v

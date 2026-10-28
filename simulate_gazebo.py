@@ -39,7 +39,10 @@ after, from the viewpoint it names. They are drawn on the CPU by
 'snapshot_raster.py' -- Gazebo's own renderer needs a GPU or EGL, which a
 sandbox does not have -- out of the world file Gazebo ran, each visual placed
 where the pose messages say its model and its link were at the first reading
-and at the last; see 'world_layout' and 'arrange'.
+and at the last; see 'world_layout' and 'arrange'. And it asks for a video of
+the whole run beside them, from the same viewpoint: a frame every 1/25 s of
+simulated time, each one drawn the same way from the pose message of its
+instant once the run is over; see 'Film'.
 
 **Why the clock is read out of the messages.** Gazebo runs at a real-time
 factor of about one, so waiting ten wall-clock seconds is *nearly* ten seconds of
@@ -1303,6 +1306,10 @@ def world_layout(scene_file, warnings):
         for visual in element.findall("visual"):
             drawn = geometry(visual)
             if drawn is not None:
+                if "triangles" in drawn:
+                    # Turned outward where it is a closed surface, whose back
+                    # need not be drawn: half of what a frame costs.
+                    drawn["triangles"], drawn["closed"] = snapshot_raster.outward(drawn["triangles"])
                 drawn["pose"] = gazebo_common.parse_pose(visual.find("pose"))
                 drawn["color"] = color(visual)
                 visuals.append(drawn)
@@ -1368,6 +1375,7 @@ def arrange(layout, poses):
                     solids.append(
                         {
                             "triangles": snapshot_raster.place(visual["triangles"], rotation, t),
+                            "closed": visual.get("closed", False),
                             "color": visual["color"],
                             "id": ident,
                         }
@@ -1396,6 +1404,56 @@ def take_snapshots(path, snapshot, scene_file, first, last, warnings):
     except Exception as e:  # pylint: disable=broad-except
         warnings.append("the snapshots could not be drawn: %s: %s" % (type(e).__name__, e))
         return {}
+
+
+class Film:
+    """The video PartCAD asked for, as the run goes: where everything was at each frame's instant.
+
+    A frame is due every 1/fps seconds of simulated time, from the start of the
+    run to its end ('snapshot_raster.frame_times'), so the video plays the run
+    in real time. Each one is the first pose message at or past its instant --
+    Gazebo publishes sixty a second, so never more than a sixtieth of a second
+    late -- and a message that comes after a gap is every frame the gap held.
+    Only the poses of each are kept while the run goes on, and the pictures are
+    drawn from them once it is over, by 'record', out of the same world file the
+    snapshots are. Nothing here can fail the run: a film that cannot be made is
+    a warning beside its result.
+    """
+
+    def __init__(self, video, duration):
+        import snapshot_raster
+
+        self.video = video
+        self.times = snapshot_raster.frame_times(duration, video.get("fps") or snapshot_raster.DEFAULT_FPS)
+        self.poses = []
+
+    def watch(self, moment, message):
+        """Keep where everything is in 'message', taken at 'moment', for every frame due by then."""
+        if len(self.poses) < len(self.times) and moment >= self.times[len(self.poses)] - FRAME_SLACK:
+            poses = unique_poses(message)
+            while len(self.poses) < len(self.times) and moment >= self.times[len(self.poses)] - FRAME_SLACK:
+                self.poses.append(poses)
+
+    def record(self, path, scene_file, deadline, warnings):
+        """Draw and encode the video, and return its file relative to 'path' -- or None, and a warning."""
+        if not self.poses or not path:
+            return None
+        try:
+            import snapshot_raster
+
+            layout = world_layout(scene_file, warnings)
+            return snapshot_raster.record(
+                path, self.video, len(self.poses), lambda index: arrange(layout, self.poses[index]), deadline
+            )
+        except Exception as e:  # pylint: disable=broad-except
+            warnings.append("the video could not be recorded: %s: %s" % (type(e).__name__, e))
+            return None
+
+
+# How far short of a frame's instant a pose message may be and still be taken
+# for it: the simulated clock is a sum of steps, and 0.001 added a thousand
+# times is not quite one.
+FRAME_SLACK = 1e-9
 
 
 def messages(stream):
@@ -2547,6 +2605,9 @@ def process(path, request):
     # keyed by name is enough for a validation and not for a picture, which
     # has to know which link of which model each pose belongs to.
     first = last = None
+    # The video PartCAD would like of the whole run, from the same viewpoint as
+    # the snapshots: where everything was at each frame's instant.
+    film = Film(request["video"], duration) if request.get("video") else None
     streams = []
     run_file = scene_file
     try:
@@ -2752,6 +2813,8 @@ def process(path, request):
                     )
             after = reading
             last = message
+            if film is not None:
+                film.watch(reading["time"], message)
             for stream in streams:
                 stream.forget_before(reading["time"])
             if next_sample is not None and reading["time"] >= next_sample and len(trace) < samples:
@@ -2816,6 +2879,13 @@ def process(path, request):
     drawn = take_snapshots(path, request.get("snapshot"), scene_file, first, last, warnings)
     if drawn:
         result["snapshots"] = drawn
+    if film is not None:
+        # Last, and inside what is left of the budget: the run has its answer
+        # by now, and a video that would not be finished in time is given up
+        # rather than allowed to cost the run that answer.
+        recorded = film.record(path, scene_file, deadline.at, warnings)
+        if recorded:
+            result["video"] = recorded
     if warnings:
         result["warnings"] = warnings
     return result
