@@ -117,7 +117,8 @@ server publishes is read on a thread of its own, and the run is checked while it
 waits: a server that has exited fails the run at once, with its exit status and
 the end of what it wrote (see 'Programs'); a server that says it loaded no
 systems fails it at once too ('no_systems'); poses that do not come to a
-running server's subscriber are subscribed to again ('RESUBSCRIBE'); a first
+running server's subscriber are subscribed to again ('RESUBSCRIBE'), and so
+are joint states that do not while the poses come; a first
 reading that does not come within ``startup_timeout`` fails it saying where it
 was listening, how many poses came, and what each joint stream said
 ('no_first_reading'); and every wait -- for poses, for joint states, for the
@@ -479,6 +480,13 @@ STARTUP_TIMEOUT = 120.0
 # subscriber started again registers again. Starting one while a slow server is
 # still loading the world costs nothing but the start: the world is paused
 # until the first reading, so no pose is missed.
+#
+# The same goes for a model's joint states, which a server publishes every
+# step of a paused world as well as of a running one: a stream of them that has
+# said nothing while the poses come is subscribed to again on the same
+# schedule, and the first reading waits for it. Not a joint's wrench, nor a
+# model's link poses, which come only once the world runs, so that their
+# silence before then says nothing.
 RESUBSCRIBE = 10.0
 
 # How often a wait looks up from the stream it is reading to check on the
@@ -2097,35 +2105,66 @@ class JointStream:
         self.ended = False
         self.silent = False
         self.condition = threading.Condition()
+        # The one stream heard from (see 'listen'), and how many subscribers
+        # have been listened to (see 'RESUBSCRIBE').
+        self.current = None
+        self.subscriptions = 0
 
     def split(self, stream):
         return messages(stream)
 
+    def listen(self, stream):
+        """Read 'stream' from now on, on a thread of its own, in place of the one before.
+
+        What that one says after this is dropped, its end included: that is
+        the end of a subscriber this run stopped, and not of the one it reads.
+        """
+        with self.condition:
+            self.current = stream
+            self.subscriptions += 1
+            self.ended = False
+            self.silent = False
+        threading.Thread(target=self.follow, args=(stream,), daemon=True).start()
+
     def follow(self, stream):
-        """Keep every message 'stream' carries, until it ends."""
+        """Keep every message 'stream' carries, until it ends or another is listened to in its place."""
+        with self.condition:
+            if self.current is None:
+                self.current = stream
         try:
             for text in self.split(stream):
                 stamp = message_time(text)
                 with self.condition:
+                    if stream is not self.current:
+                        return
                     self.entries.append((stamp, text))
                     self.newest = stamp
                     self.count += 1
+                    # Whatever a wait took it for: it is waited for again.
+                    self.silent = False
                     self.condition.notify_all()
         except (OSError, ValueError):
             # Closed under it, which is one of the ways a run ends.
             pass
         finally:
             with self.condition:
-                self.ended = True
-                self.condition.notify_all()
+                if stream is self.current:
+                    self.ended = True
+                    self.condition.notify_all()
 
     def _wait(self, reached, patience):
-        """Wait, holding the condition, until 'reached()', the stream ends, or 'patience' runs out."""
+        """Wait, holding the condition, until 'reached()', the stream ends, or 'patience' runs out.
+
+        A stream that said nothing for all of a wait is taken for silent, and
+        not waited for again until it speaks; one that was given no time to
+        say anything in -- a reading's wait spent on the streams before it
+        ('fill') -- is not.
+        """
         deadline = time.monotonic() + patience
         while not self.ended and not self.silent and not reached():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self.silent = self.newest is None
+                self.silent = self.newest is None and patience > 0
                 break
             self.condition.wait(remaining)
 
@@ -2493,9 +2532,11 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
 def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=None):
     """State in 'reading' where the joints of every stream were at its instant.
 
-    'patience' is how long to wait for a stream that has not got that far yet
-    (see 'JointStream.at'); nothing is worth waiting for once the server that
-    publishes them has gone. A ball and a floating child are read from the
+    'patience' is how long to wait for the streams that have not got that far
+    yet (see 'JointStream.at'), between them: they run alongside each other,
+    so one wait serves them all, and a stream that says nothing does not make
+    the next one wait as long again. Nothing is worth waiting for once the
+    server that publishes them has gone. A ball and a floating child are read from the
     reading's own bodies, and their speeds from their models' link streams
     ('posed_states').
 
@@ -2506,6 +2547,11 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
     such stream is put in 'late', a dict, if one is given: its model's name,
     and the time of the state it had to give instead.
     """
+    until = time.monotonic() + patience
+
+    def left():
+        return max(0.0, until - time.monotonic())
+
     links = {}
     in_step = True
     for stream in streams:
@@ -2515,12 +2561,15 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
         if stream.model.links:
             links[stream.model.scoped] = stream
             continue
-        text = stream.at(reading["time"], patience)
+        text = stream.at(reading["time"], left())
         if text is None:
             note(
                 warnings,
-                "the joints of model '%s' are not reported: Gazebo published no joint states for it"
-                % stream.model.shown,
+                "the joints of model '%s' are not reported: Gazebo published no joint states for it%s"
+                % (
+                    stream.model.shown,
+                    " to any of the %d subscribers it had" % stream.subscriptions if stream.subscriptions > 1 else "",
+                ),
             )
             continue
         stamp = message_time(text)
@@ -2529,7 +2578,7 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
             if late is not None:
                 late[stream.model.shown] = stamp
         reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
-    posed_states(reading, names, links, warnings, patience)
+    posed_states(reading, names, links, warnings, left())
     return in_step
 
 
@@ -2612,10 +2661,10 @@ def process(path, request):
     run_file = scene_file
     try:
 
-        def subscribe():
-            """A 'gz topic -e' for the poses, in this run's partition."""
+        def subscribe(on=topic):
+            """A 'gz topic -e' for the poses, or for the topic 'on', in this run's partition."""
             return programs.start(
-                [server, topic_command, "-e", "-t", topic],
+                [server, topic_command, "-e", "-t", on],
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL,
                 text=True,
@@ -2649,19 +2698,23 @@ def process(path, request):
 
         # A subscriber for the joints of each model that has any -- and for
         # the links of each that has a ball, whose speed is read from them --
-        # listening before the server starts for the reason the one above is.
+        # listening before the server starts for the reason the one above is;
+        # kept by stream, so that it can be stopped once another is subscribed
+        # in its place.
+        joint_watchers = {}
         for model in joint_models:
-            joint_watcher = programs.start(
-                [server, topic_command, "-e", "-t", model.topic],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                text=True,
-                bufsize=1,
-                env=run_env,
-            )
-            streams.append((LinkStream if model.links else JointStream)(model))
-            threading.Thread(target=streams[-1].follow, args=(joint_watcher.stdout,), daemon=True).start()
+            stream = (LinkStream if model.links else JointStream)(model)
+            joint_watchers[stream] = subscribe(model.topic)
+            stream.listen(joint_watchers[stream].stdout)
+            streams.append(stream)
         wrenches = [stream for stream in streams if isinstance(stream.model, Wrench)]
+        # The joint states, which come every step of a paused world as well as
+        # of a running one -- unlike a wrench, or a model's link poses, which
+        # come only once it runs: a stream of them that has said nothing while
+        # the poses come is one its server never heard subscribe.
+        joint_state_streams = [
+            stream for stream in streams if not isinstance(stream.model, Wrench) and not stream.model.links
+        ]
 
         simulator = programs.start(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, env=run_env)
         # Read as it comes, so that a server with a lot to say never blocks on
@@ -2688,6 +2741,14 @@ def process(path, request):
         seen = None
         behind = {}
         resubscribe_at = waiting_since + RESUBSCRIBE
+        # When each stream of joint states that has said nothing is subscribed
+        # to again (see 'RESUBSCRIBE'), on the poses' schedule; and how long
+        # the first reading may wait for it to say something -- until a moment
+        # short of 'startup_timeout', and past that only to make a
+        # re-subscription due before it, so that every one due inside it is
+        # made, and the world is still read in time.
+        joints_resubscribe_at = {stream: resubscribe_at for stream in joint_state_streams}
+        hold_until = first_by - POLL
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""
@@ -2774,7 +2835,35 @@ def process(path, request):
             if before is None:
                 seen = reading["time"]
                 behind.clear()
-                if not fill(reading, streams, warnings, patience(), names, behind):
+                unheard = [stream for stream in joint_state_streams if not stream.count]
+                if unheard and (
+                    time.monotonic() < hold_until or any(joints_resubscribe_at[stream] < first_by for stream in unheard)
+                ):
+                    # Not a word from a stream of joint states, while the
+                    # poses come from the same server: a subscriber it may
+                    # never have registered. The first reading waits for it,
+                    # as it does for one behind; the world is paused, so
+                    # nothing is missed. Subscribed to again on the poses'
+                    # schedule, the new subscriber first and then the old one
+                    # stopped.
+                    for stream in unheard:
+                        if time.monotonic() >= joints_resubscribe_at[stream]:
+                            stale, joint_watchers[stream] = joint_watchers[stream], subscribe(stream.model.topic)
+                            stream.listen(joint_watchers[stream].stdout)
+                            _signal_group(stale, signal.SIGTERM)
+                            later = RESUBSCRIBE * 2 ** (stream.subscriptions - 1)
+                            joints_resubscribe_at[stream] = time.monotonic() + later
+                    # What the streams that do speak say meanwhile, a message
+                    # every step, is kept only as far as a reading can still
+                    # ask for it, as after the first reading.
+                    for stream in streams:
+                        stream.forget_before(reading["time"])
+                    continue
+                # Not past 'startup_timeout' either, which the first reading
+                # is held to.
+                if not fill(
+                    reading, streams, warnings, min(patience(), max(0.0, first_by - time.monotonic())), names, behind
+                ):
                     # A joint stream that began after this instant has only a
                     # later step to give, so the joints would be a step from
                     # where the bodies are: 'before' is the first instant
@@ -2791,6 +2880,15 @@ def process(path, request):
                         " gz-transport does once, in one UDP datagram that a busy machine can lose"
                         % (time.monotonic() - waiting_since, subscriptions),
                     )
+                for stream in joint_state_streams:
+                    if stream.count and stream.subscriptions > 1:
+                        note(
+                            warnings,
+                            "Gazebo published no joint states of model '%s' to this run while it published its poses,"
+                            " and did once they were subscribed to again (%d subscribers in all): its server never"
+                            " registered the first subscriber, which gz-transport does once, in one UDP datagram that"
+                            " a busy machine can lose" % (stream.model.shown, stream.subscriptions),
+                        )
                 before = reading
                 first = message
                 running, answer = unpause(server, world, run_env, min(10.0, max(1.0, deadline.remaining())))

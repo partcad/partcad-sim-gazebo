@@ -566,8 +566,8 @@ publishes in another transport partition. So nothing here waits blindly:
   `warnings`. A `GZ_SIM_SERVER_CONFIG_PATH` you have set is kept. A server that
   says it loaded no systems all the same fails the run at once, saying which
   configuration it read.
-- **Poses that never reach a running server's subscriber are subscribed to
-  again.** gz-transport registers a subscriber with the server publishing its
+- **Poses and joint states that never reach a running server's subscriber are
+  subscribed to again.** gz-transport registers a subscriber with the server publishing its
   topic once, in one UDP datagram, when it first hears of that server, and a
   machine running several servers at once drops such datagrams: every process
   hears every other's discovery traffic, whatever its partition. A subscriber
@@ -576,6 +576,14 @@ publishes in another transport partition. So nothing here waits blindly:
   pose at all ten seconds after its server started subscribes again, and again
   twice as long after that, inside `startup_timeout`. The world is paused until
   the first reading, so nothing is missed, and `warnings` says it happened.
+  The same goes for a model's joint states: Gazebo publishes them every step of
+  a paused world too, so a stream of them that says nothing while the poses come
+  is a subscriber the server never registered. The first reading waits for it,
+  subscribing again on the same schedule, until a moment short of
+  `startup_timeout`; one that still says nothing is named in `warnings`, with
+  how many subscribers it had, and the run goes on without those joints. A joint's wrench and a
+  model's link poses come only once the world runs, so their silence before
+  the first reading says nothing, and they are not subscribed to again.
   A service is found the same way, so a call to the world's control service
   that nothing answered is made again, up to three times, before the run
   fails saying the world would not be set running.
@@ -586,7 +594,8 @@ publishes in another transport partition. So nothing here waits blindly:
   that came with no first reading taken from them are counted, and each joint
   stream that had only a later instant to give is named.
 - **Every wait is inside the run's budget**, `timeout`: for poses, for joint
-  states (each joint stream is waited for at most ten seconds, and once for one
+  states (before the first reading, inside `startup_timeout` as above; after
+  it, each joint stream is waited for at most ten seconds, and once for one
   that has said nothing), and for `gz sim --versions`. PartCAD hands every run
   its budget and stops the run when it is spent; this script stops a tenth of
   it earlier -- at least a second, at most thirty -- and says how far it got:

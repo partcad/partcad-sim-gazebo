@@ -528,6 +528,82 @@ def test_a_stream_that_says_nothing_is_waited_for_once():
     assert time.monotonic() - started < 2
 
 
+def test_a_stream_listened_to_in_place_of_another_hears_only_the_new_one():
+    """What a subscriber that was replaced says after it, its end included, is not heard (see 'RESUBSCRIBE')."""
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
+    old_read, old_write = os.pipe()
+    new_read, new_write = os.pipe()
+    with os.fdopen(old_read) as old, os.fdopen(old_write, "w") as old_writer, os.fdopen(new_read) as new:
+        stream.listen(old)
+        stream.listen(new)
+        old_writer.write(stamped(0.001))
+        old_writer.flush()
+        old_writer.close()
+        with os.fdopen(new_write, "w") as new_writer:
+            new_writer.write(stamped(0.002) + stamped(0.003))
+            new_writer.flush()
+
+            # A message is whole once the next one starts: the second, here.
+            assert sim.message_time(stream.at(0.002, patience=5)) == pytest.approx(0.002)
+            # The old one has ended and the stream has not: it is still read.
+            assert not stream.ended
+            assert [stamp for stamp, _text in stream.entries] == pytest.approx([0.002])
+            assert stream.subscriptions == 2
+        # And it ends with the one it reads, and its last message with it.
+        deadline = time.monotonic() + 5
+        while not stream.ended and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert stream.ended
+        assert [stamp for stamp, _text in stream.entries] == pytest.approx([0.002, 0.003])
+
+
+def test_a_stream_listened_to_again_after_it_ended_is_waited_for_again():
+    """A subscriber that died having said nothing, replaced: the stream is not taken for one that has ended."""
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
+    stream.follow(iter(()))
+    assert stream.ended and stream.at(1.0, patience=5) is None
+    read, write = os.pipe()
+    with os.fdopen(read) as reader, os.fdopen(write, "w") as writer:
+        stream.listen(reader)
+        writer.write(stamped(1.0) + stamped(1.001))
+        writer.flush()
+
+        assert sim.message_time(stream.at(1.0, patience=5)) == pytest.approx(1.0)
+
+
+def test_a_stream_given_no_time_to_speak_in_is_not_taken_for_silent():
+    """A reading's wait spent on the streams before it ('fill'): the next reading still waits for this one."""
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
+
+    assert stream.at(1.0, patience=0) is None
+    assert not stream.silent
+
+
+def test_a_silent_stream_that_speaks_is_waited_for_again():
+    """Taken for silent after a wait it said nothing in, and then heard from: a reading waits for it to catch up."""
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
+    assert stream.at(1.0, patience=0.1) is None and stream.silent
+    read, write = os.pipe()
+    with os.fdopen(read) as reader, os.fdopen(write, "w") as writer:
+        threading.Thread(target=stream.follow, args=(reader,), daemon=True).start()
+        writer.write(stamped(0.5) + stamped(0.6))
+        writer.flush()
+        # Heard from, which is what clears it: the first message is whole once
+        # the second starts.
+        deadline = time.monotonic() + 5
+        while stream.silent and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not stream.silent
+
+        def catch_up():
+            time.sleep(0.2)
+            writer.write(stamped(1.0) + stamped(1.1))
+            writer.flush()
+
+        threading.Thread(target=catch_up, daemon=True).start()
+        assert sim.message_time(stream.at(1.0, patience=5)) == pytest.approx(1.0)
+
+
 def test_what_no_reading_can_ask_for_any_more_is_forgotten():
     """Which is everything before the latest message at or before a pose already
     seen: a reading is never asked for at an earlier instant than that."""
@@ -549,6 +625,22 @@ def test_a_reading_is_filled_from_every_stream_and_a_silent_one_is_named():
 
     assert list(reading["joints"]) == ["swing"]
     assert warnings == ["the joints of model 'other' are not reported: Gazebo published no joint states for it"]
+
+
+def test_a_reading_waits_for_its_streams_once_between_them():
+    """They run alongside each other, so two that say nothing cost one wait and not two."""
+    reading = {"time": 3.5, "bodies": {}, "joints": {}}
+    silent = [
+        sim.JointStream(sim.JointModel(model, "/t/%d" % index, {"lift": ("prismatic", "lift", "prismatic")}))
+        for index, model in enumerate(("one", "two"))
+    ]
+    warnings = []
+
+    started = time.monotonic()
+    sim.fill(reading, silent, warnings, patience=0.5)
+
+    assert 0.5 <= time.monotonic() - started < 0.9
+    assert len(warnings) == 2
 
 
 #

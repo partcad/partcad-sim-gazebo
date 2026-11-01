@@ -88,6 +88,33 @@ def pose(t, z):
     sys.stdout.flush()
 
 
+def joint(t):
+    sys.stdout.write(
+        "header {\n  stamp {\n    sec: %%d\n    nsec: %%d\n  }\n}\nname: \"block\"\nid: 8\n"
+        "joint {\n  name: \"swing\"\n  id: 9\n  axis1 {\n    position: 0\n  }\n}\n"
+        %% (int(t), int(round((t %% 1) * 1e9)))
+    )
+    sys.stdout.flush()
+
+
+# Where the world being set running is remembered, in the modes that keep it
+# paused until then, as Gazebo does: its first instant, over and over, until the
+# control service is called, and then a step at a time.
+RUNNING = os.environ["FAKE_GZ_STATE"] + ".running"
+PAUSING = ("silent-joints", "deaf-joints")
+
+
+def paused_then_running(say):
+    # 'say(t)' every 5 ms: at t = 0 while the world is paused, and then up a
+    # step each time to t = 1.
+    step = 0
+    while step <= 40:
+        if os.path.exists(RUNNING):
+            step += 1
+        say(max(0, step - 1) * 0.025)
+        time.sleep(0.005)
+
+
 if args[:1] == ["sim"] and "--versions" in args:
     print("Gazebo Sim, version 8.9.0 (fake)")
     sys.exit(0)
@@ -126,6 +153,8 @@ elif args[:1] == ["service"]:
         print("Service call timed out")
     else:
         print("data: false" if mode == "stuck" else "data: true")
+        if mode in PAUSING:
+            open(RUNNING, "w").close()
 elif args[:1] == ["topic"]:
     topic = args[args.index("-t") + 1]
     if "/joint_state/" in topic and mode in ("no-poses", "late-joints"):
@@ -139,6 +168,17 @@ elif args[:1] == ["topic"]:
             )
             sys.stdout.flush()
             time.sleep(0.005)
+    if "/joint_state/" in topic and mode == "deaf-joints":
+        # The first subscriber to the joint states is one the server never
+        # registered: connected, and hearing nothing, for ever. The next one
+        # is heard.
+        with open(os.environ["FAKE_GZ_STATE"] + ".joints", "a") as f:
+            f.write("x")
+        if os.path.getsize(os.environ["FAKE_GZ_STATE"] + ".joints") == 1:
+            time.sleep(600)
+        paused_then_running(joint)
+    if topic.endswith("/pose/info") and mode in PAUSING:
+        paused_then_running(lambda t: pose(t, 1.0 - 0.4 * t))
     if topic.endswith("/pose/info") and mode == "deaf-first":
         # The first subscriber is one the server never registered: connected,
         # and hearing nothing, for ever. The next one is heard.
@@ -148,7 +188,7 @@ elif args[:1] == ["topic"]:
             time.sleep(600)
         mode = "ok"
     if topic.endswith("/pose/info"):
-        if mode in ("ok", "silent-joints", "stuck", "timeout", "timeout-once", "late-joints"):
+        if mode in ("ok", "stuck", "timeout", "timeout-once", "late-joints"):
             for step in range(41):
                 pose(step * 0.025, 1.0 - step * 0.01)
                 time.sleep(0.005)
@@ -422,14 +462,82 @@ def test_a_run_that_will_not_reach_its_duration_within_its_budget_stops_itself(g
     assert_nothing_outlived_the_run(gazebo)
 
 
-def test_a_joint_subscriber_that_never_hears_costs_a_warning_and_a_bounded_wait(gazebo, tmp_path, monkeypatch):
-    gazebo("silent-joints")
-    monkeypatch.setattr(sim, "PATIENCE", 0.5)
+def test_joint_states_a_running_server_never_sends_are_subscribed_to_again(gazebo, tmp_path, monkeypatch):
+    """As the poses are: the first reading waits for them, the world paused, so they are in it rather than missing."""
+    gazebo("deaf-joints")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
 
     result, error, took = run(tmp_path, world=JOINTED)
 
+    assert error is None and took < 10
+    assert result["before"]["time"] == 0.0 and result["reached"] >= 0.5
+    assert "swing" in result["before"]["joints"] and "swing" in result["after"]["joints"]
+    assert any(
+        "no joint states of model 'block'" in w and "once they were subscribed to again (2 subscribers in all)" in w
+        for w in result["warnings"]
+    )
+    assert not any("are not reported" in w for w in result["warnings"])
+    subscribers = [args for args in _invocations(gazebo) if args[:1] == ["topic"] and "/joint_state/" in args[-1]]
+    assert len(subscribers) == 2
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_joint_states_are_subscribed_to_again_inside_a_startup_timeout_shorter_than_their_patience(
+    gazebo, tmp_path, monkeypatch
+):
+    """Every re-subscription due inside 'startup_timeout' is made, not only those ten seconds short of it."""
+    gazebo("deaf-joints")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.5)
+
     assert error is None and took < 5
-    assert any("published no joint states" in warning for warning in result["warnings"])
+    assert "swing" in result["before"]["joints"]
+    assert any("once they were subscribed to again (2 subscribers in all)" in w for w in result["warnings"])
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_joint_re_subscription_due_in_the_last_moment_of_startup_timeout_is_made(gazebo, tmp_path, monkeypatch):
+    """Due after the hold would have ended and before 'startup_timeout': made, and the joints are in the reading."""
+    gazebo("deaf-joints")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=0.6)
+
+    assert error is None and took < 5
+    assert "swing" in result["before"]["joints"]
+    assert any("once they were subscribed to again (2 subscribers in all)" in w for w in result["warnings"])
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_joint_subscriber_that_never_hears_is_waited_for_no_longer_than_startup_timeout(gazebo, tmp_path):
+    """A 'startup_timeout' shorter than the ten seconds a stream is given bounds the first reading all the same."""
+    gazebo("silent-joints")
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.0)
+
+    assert error is None and took < 3
+    assert result["before"]["time"] == 0.0
+    assert any("published no joint states for it" in warning for warning in result["warnings"])
+    assert_nothing_outlived_the_run(gazebo)
+
+
+def test_a_joint_subscriber_that_never_hears_costs_a_warning_and_a_bounded_wait(gazebo, tmp_path, monkeypatch):
+    """Subscribed to again while there is time to, and then read without, inside 'startup_timeout'."""
+    gazebo("silent-joints")
+    monkeypatch.setattr(sim, "PATIENCE", 0.5)
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.3)
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=2.0)
+
+    assert error is None and 1.5 <= took < 5
+    assert result["before"]["time"] == 0.0
+    silent = [w for w in result["warnings"] if "published no joint states for it" in w]
+    assert len(silent) == 1
+    subscribed = re.search(r"to any of the (\d+) subscribers it had", silent[0])
+    assert subscribed and 2 <= int(subscribed.group(1)) <= 3
+    subscribers = [args for args in _invocations(gazebo) if args[:1] == ["topic"] and "/joint_state/" in args[-1]]
+    assert len(subscribers) == int(subscribed.group(1))
     assert_nothing_outlived_the_run(gazebo)
     assert sorted(os.listdir(tmp_path / "run")) == ["scene.world"]
 
