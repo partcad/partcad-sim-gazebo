@@ -21,6 +21,7 @@ uses, as CI runs it (see 'Tests' in the README):
 import concurrent.futures
 import math
 import os
+import socket
 import sys
 
 import pytest
@@ -112,6 +113,72 @@ def test_a_partition_is_a_name_gz_transport_accepts():
     assert "//" not in partition
 
 
+#
+# The discovery ports a run's programs are started with
+#
+
+
+def test_a_run_has_discovery_ports_of_its_own_in_both_spellings():
+    environment, _partition = sim.run_environment({"PATH": "/bin"}, token="abc")
+
+    topics, services = int(environment["GZ_DISCOVERY_MSG_PORT"]), int(environment["GZ_DISCOVERY_SRV_PORT"])
+    assert environment["IGN_DISCOVERY_MSG_PORT"] == str(topics)
+    assert environment["IGN_DISCOVERY_SRV_PORT"] == str(services)
+    assert services == topics + 1
+    assert sim.DISCOVERY_PORTS[0] <= topics < services <= sim.DISCOVERY_PORTS[1]
+    # Not gz-transport's own, 10317 and 10318, which every other process uses.
+    assert topics > 10318
+
+
+def test_runs_have_ports_of_their_own():
+    """2268 pairs to pick from: 50 runs share some pair now and then, never most of them."""
+    pairs = {sim.run_environment({})[0]["GZ_DISCOVERY_MSG_PORT"] for _ in range(50)}
+    assert len(pairs) >= 45
+
+
+def test_a_pair_something_holds_is_passed_over():
+    """A concurrent run's server holds its pair as gz-transport binds it, with 'SO_REUSEADDR'."""
+    first = sim.discovery_ports({}, "abc")
+    held = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    held.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        held.bind(("", first[1]))
+        assert sim.discovery_ports({}, "abc") not in (None, first)
+    finally:
+        held.close()
+
+
+def test_with_every_pair_held_the_ports_are_left_as_they_are(monkeypatch):
+    """What every run did before it had ports of its own: its partition still keeps it apart."""
+    monkeypatch.setattr(sim, "_unbound", lambda port: False)
+
+    environment, partition = sim.run_environment({}, token="abc")
+
+    assert not any(name in environment for names in sim.DISCOVERY_PORT_VARIABLES for name in names)
+    assert environment["GZ_PARTITION"] == partition == "partcad-abc"
+
+
+@pytest.mark.parametrize("name", sim.DISCOVERY_VARIABLES)
+def test_discovery_the_user_set_up_is_left_as_it_is(name):
+    """Theirs to have set, whichever part of it: the ports, the group, a relay to another machine."""
+    environment, _partition = sim.run_environment({name: "kept"}, token="abc")
+
+    assert environment[name] == "kept"
+    assert all(environment.get(other) in (None, "kept") for names in sim.DISCOVERY_PORT_VARIABLES for other in names)
+
+
+def test_a_failure_says_where_the_runs_discovery_was():
+    environment, _partition = sim.run_environment({}, token="abc")
+
+    said = sim.discovery_said(environment)
+
+    assert said == " (discovery on ports %s and %s)" % (
+        environment["GZ_DISCOVERY_MSG_PORT"],
+        environment["GZ_DISCOVERY_SRV_PORT"],
+    )
+    assert sim.discovery_said({}) == ""
+
+
 def test_the_server_and_every_subscriber_are_started_in_it(monkeypatch, tmp_path):
     """All of them, or the ones left out hear nothing at all; checked by
     starting nothing and recording what would have been started."""
@@ -142,6 +209,8 @@ def test_the_server_and_every_subscriber_are_started_in_it(monkeypatch, tmp_path
     assert [command[:2] for command, _env in started] == [["gz", "topic"], ["gz", "topic"], ["gz", "sim"]]
     partitions = {env["GZ_PARTITION"] for _command, env in started}
     assert len(partitions) == 1 and partitions.pop().startswith("partcad-")
+    ports = {(env.get("GZ_DISCOVERY_MSG_PORT"), env.get("GZ_DISCOVERY_SRV_PORT")) for _command, env in started}
+    assert len(ports) == 1
     assert all(env["PATH"] == "/bin" for _command, env in started)
 
 
@@ -233,3 +302,34 @@ def test_in_gazebo_two_runs_of_one_world_at_once_each_report_only_themselves(gaz
                 moving = 0.5 * (0.25 + 4e-5) * math.radians(swing["vel"]) ** 2
                 assert moving == pytest.approx(fallen, abs=0.02 * G * 0.5), (name, t)
         assert results[name]["after"]["time"] >= 1.0, name
+
+
+def test_in_gazebo_runs_at_once_each_discover_on_ports_of_their_own(gazebo, tmp_path, monkeypatch):
+    """Six runs of one world side by side, as 'pc test' starts a package's simulations: each on a pair of discovery
+    ports no other run has, and each reading only its own world -- its block falling from its own height."""
+    for name in sim.DISCOVERY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    environments = []
+    started = sim.run_environment
+
+    def recorded(*args, **kwargs):
+        environment, partition = started(*args, **kwargs)
+        environments.append(environment)
+        return environment, partition
+
+    monkeypatch.setattr(sim, "run_environment", recorded)
+    heights = {"run%d" % k: 1.0 + k for k in range(6)}
+    requests = {}
+    for name, height in heights.items():
+        (tmp_path / name).mkdir()
+        requests[name] = dict(twin(tmp_path / name, height, swinging=False), duration=0.5, samples=0)
+
+    with concurrent.futures.ThreadPoolExecutor(len(requests)) as pool:
+        running = {name: pool.submit(sim.process, str(tmp_path / name), request) for name, request in requests.items()}
+        results = {name: future.result() for name, future in running.items()}
+
+    pairs = {(e["GZ_DISCOVERY_MSG_PORT"], e["GZ_DISCOVERY_SRV_PORT"]) for e in environments}
+    assert len(environments) == len(pairs) == len(requests)
+    for name, height in heights.items():
+        assert results[name]["before"]["bodies"]["block"]["pos"][2] == pytest.approx(height * 1000.0, abs=1.0), name
+        assert results[name]["reached"] >= 0.5, name

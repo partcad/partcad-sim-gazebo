@@ -117,6 +117,16 @@ is handed poses that were not its own. A `GZ_PARTITION` you have set (or
 `<yours>:partcad-<random>`, rather than used as it is, which would put every run
 back into one.
 
+Every run also has **discovery ports** of its own (`GZ_DISCOVERY_MSG_PORT` and
+`GZ_DISCOVERY_SRV_PORT`, a pair at random from 61000-65535 that nothing is
+bound to). A partition keeps runs from reading each other, but not from
+hearing each other: every Gazebo process on a machine is sent every other's
+discovery traffic, whatever its partition. With sixteen runs at once that
+overflows each process's socket buffer, and what is dropped can leave a
+subscriber that never hears its server (below). Discovery you have set up
+yourself -- either of those two variables, `GZ_DISCOVERY_MULTICAST_IP` or
+`GZ_RELAY`, or their `IGN_` spellings -- is left as it is.
+
 ### Joints
 
 A world whose models have joints in them — a hinge, a slide — also says where
@@ -565,7 +575,8 @@ publishes in another transport partition. So nothing here waits blindly:
   what a copy cut short leaves -- which is passed over and named in
   `warnings`. A `GZ_SIM_SERVER_CONFIG_PATH` you have set is kept. A server that
   says it loaded no systems all the same fails the run at once, saying which
-  configuration it read.
+  configuration it read. Reported upstream as
+  [gazebosim/gz-sim#4163](https://github.com/gazebosim/gz-sim/issues/4163).
 - **Poses and joint states that never reach a running server's subscriber are
   subscribed to again.** gz-transport registers a subscriber with the server publishing its
   topic once, in one UDP datagram, when it first hears of that server, and a
@@ -576,6 +587,10 @@ publishes in another transport partition. So nothing here waits blindly:
   pose at all ten seconds after its server started subscribes again, and again
   twice as long after that, inside `startup_timeout`. The world is paused until
   the first reading, so nothing is missed, and `warnings` says it happened.
+  Discovery ports of each run's own (above) make a lost registration much
+  rarer, and this is what is left for one that is lost all the same. Reported
+  upstream as
+  [gazebosim/gz-transport#985](https://github.com/gazebosim/gz-transport/issues/985).
   The same goes for a model's joint states: Gazebo publishes them every step of
   a paused world too, so a stream of them that says nothing while the poses come
   is a subscriber the server never registered. The first reading waits for it,
@@ -588,7 +603,8 @@ publishes in another transport partition. So nothing here waits blindly:
   that nothing answered is made again, up to three times, before the run
   fails saying the world would not be set running.
 - **A first reading that does not come within `startup_timeout`** fails the
-  run, saying which topic it listened on and in which partition, and what did
+  run, saying which topic it listened on, in which partition and on which
+  discovery ports, and what did
   come: a server whose joint states arrive and whose poses do not is running,
   and has no scene broadcaster or never heard the run subscribe; pose messages
   that came with no first reading taken from them are counted, and each joint

@@ -98,7 +98,9 @@ it: every entity under its own name, relative to its parent.
 **A partition of its own.** Every run talks to its server in a Gazebo transport
 partition nobody else is in, so that two runs on one machine -- two worlds of
 the same name, which is every pair of runs of one simulation -- do not read
-each other's poses and joints; see 'run_environment'.
+each other's poses and joints; see 'run_environment'. And on discovery ports of
+its own, so that it is not sent every other run's discovery either; see
+'discovery_ports'.
 
 **The systems a world runs with.** A world PartCAD exports names no systems
 of its own, so the server runs it with the ones its server configuration
@@ -134,9 +136,11 @@ import glob
 import math
 import os
 import queue
+import random
 import re
 import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
@@ -302,16 +306,113 @@ def run_environment(environment=None, token=None):
     still apart from everything, theirs included. What that costs is watching
     a run live from a client in their partition, which nothing offers today.
 
+    Every run's discovery is on ports of its own as well, so that it is not
+    sent every other run's (see 'discovery_ports').
+
     'environment' is the one to start from, None for this process's own; it is
     copied, never changed. 'token' is for tests.
     """
     result = dict(os.environ if environment is None else environment)
-    own = "partcad-%s" % (token or uuid.uuid4().hex[:16])
+    token = token or uuid.uuid4().hex[:16]
+    own = "partcad-%s" % token
     theirs = next((result[name] for name in PARTITION_VARIABLES if result.get(name)), None)
     partition = "%s:%s" % (theirs, own) if theirs else own
     for name in PARTITION_VARIABLES:
         result[name] = partition
+    ports = discovery_ports(result, token)
+    if ports is not None:
+        for names, port in zip(DISCOVERY_PORT_VARIABLES, ports):
+            for name in names:
+                result[name] = str(port)
     return result, partition
+
+
+# The variables gz-transport takes the ports of its discovery from -- one for
+# topics, one for services -- in both spellings, as the partition is.
+DISCOVERY_PORT_VARIABLES = (
+    ("GZ_DISCOVERY_MSG_PORT", "IGN_DISCOVERY_MSG_PORT"),
+    ("GZ_DISCOVERY_SRV_PORT", "IGN_DISCOVERY_SRV_PORT"),
+)
+
+# Any of which, set, is discovery somebody has set up on purpose -- with the
+# group it is sent to, and the relays that carry it to another machine -- and
+# which a run leaves as it is.
+DISCOVERY_VARIABLES = tuple(name for names in DISCOVERY_PORT_VARIABLES for name in names) + (
+    "GZ_DISCOVERY_MULTICAST_IP",
+    "IGN_DISCOVERY_MULTICAST_IP",
+    "GZ_RELAY",
+    "IGN_RELAY",
+)
+
+# The ports a run's discovery is put on, a pair at a time: IANA's dynamic range
+# above where Linux hands out ephemeral ports (32768-60999), so that neither
+# the registry nor the kernel gives them to anything else. 2268 pairs.
+DISCOVERY_PORTS = (61000, 65535)
+
+# How many pairs a run tries before it leaves the ports as they are.
+DISCOVERY_TRIES = 8
+
+
+def discovery_ports(environment, token):
+    """Two discovery ports of this run's own, as (topics, services), or None to leave them as they are.
+
+    A partition keeps two runs from reading each other, and not from hearing
+    each other: every gz-transport process on a machine sends its discovery to
+    one multicast group and port, whatever its partition, and reads every
+    other's before it looks at the partition. A server re-announces all of its
+    topics every second. So each process on a machine running several servers
+    at once is sent all of their discovery, its socket's buffer overflows, and
+    what is dropped includes the one datagram that asks a server for a topic
+    -- which is never sent again, and leaves a subscriber connected and
+    hearing nothing (see 'RESUBSCRIBE'; gazebosim/gz-transport#985). Sixteen
+    runs at once in the simulation's image dropped 30 000 to 50 000 discovery
+    datagrams a round, and now and then a subscriber heard nothing at all; on
+    ports of their own, none and none.
+
+    So every program of a run is started with discovery ports of its own: a
+    pair from 'DISCOVERY_PORTS', picked at random -- from 'token', the run's
+    random partition name -- and passed over if a bind says something already
+    holds either, which is how a concurrent run's, here, shows itself. Two runs
+    that pick one pair anyway, in separate containers or between the bind and
+    the server's start, share their discovery, which is what every run did
+    before: their partitions still keep them apart. A pair is never what keeps
+    a run working, so 'RESUBSCRIBE' stays; this lowers the odds of needing it.
+
+    Discovery set up on purpose (see 'DISCOVERY_VARIABLES') is left as it is.
+    It can be revisited once a Gazebo whose gz-transport sends that datagram
+    again is the one the image carries.
+    """
+    if any(environment.get(name) for name in DISCOVERY_VARIABLES):
+        return None
+    low, high = DISCOVERY_PORTS
+    pick = random.Random(token)
+    for _ in range(DISCOVERY_TRIES):
+        topics = low + 2 * pick.randrange((high - low + 1) // 2)
+        if _unbound(topics) and _unbound(topics + 1):
+            return topics, topics + 1
+    return None
+
+
+def _unbound(port):
+    """Whether a UDP bind to 'port' succeeds: nothing on this machine's network holds it, as far as one can tell.
+
+    Bound without 'SO_REUSEADDR', which gz-transport binds with, so that a
+    socket of its holding the port refuses this one.
+    """
+    probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        probe.bind(("", port))
+    except OSError:
+        return False
+    finally:
+        probe.close()
+    return True
+
+
+def discovery_said(environment):
+    """Where a run's discovery is, for a failure to say: its ports, when it has some of its own."""
+    topics, services = (environment.get(names[0]) for names in DISCOVERY_PORT_VARIABLES)
+    return " (discovery on ports %s and %s)" % (topics, services) if topics and services else ""
 
 
 # The variable a Gazebo since Garden reads its server configuration's path
@@ -328,7 +429,8 @@ INSTALLED_SERVER_CONFIG = os.path.join("gz-sim*", "server.config")
 SYSTEM_SHARES = ("/usr/share/gz", "/usr/local/share/gz")
 
 # What a server writes when the server configuration it read is no
-# configuration at all, and it is left with no systems (see 'server_config').
+# configuration at all, and it is left with no systems (see 'server_config';
+# gazebosim/gz-sim#4163, until which this is what a half-copied one says).
 NO_SYSTEMS = "No <server_config> element found when parsing plugins"
 
 
@@ -411,6 +513,9 @@ def server_config(environment, server, warnings):
     environment's choice and is kept, and an installation whose configuration
     cannot be found is left to Gazebo; 'NO_SYSTEMS' is what says so if that
     goes wrong (see 'no_systems').
+
+    Reported upstream as gazebosim/gz-sim#4163; revisit once a Gazebo that
+    writes its copy whole is the one the image carries.
     """
     if environment.get(SERVER_CONFIG):
         return None
@@ -479,7 +584,9 @@ STARTUP_TIMEOUT = 120.0
 # for ever, from a server that is running and publishing to nobody. A
 # subscriber started again registers again. Starting one while a slow server is
 # still loading the world costs nothing but the start: the world is paused
-# until the first reading, so no pose is missed.
+# until the first reading, so no pose is missed. Reported upstream as
+# gazebosim/gz-transport#985; revisit once a Gazebo whose gz-transport sends
+# that registration again is the one the image carries.
 #
 # The same goes for a model's joint states, which a server publishes every
 # step of a paused world as well as of a running one: a stream of them that has
@@ -843,7 +950,7 @@ def progress(world, before, after, count, duration):
     )
 
 
-def no_first_reading(world, topic, partition, waited, read, seen, streams, behind, tail, subscriptions=1):
+def no_first_reading(world, topic, partition, waited, read, seen, streams, behind, tail, subscriptions=1, discovery=""):
     """The failure a run with no first reading by its 'startup_timeout' fails with: what came, and what did not.
 
     'read' is how many pose messages came that named the bodies this run
@@ -853,7 +960,8 @@ def no_first_reading(world, topic, partition, waited, read, seen, streams, behin
     say tells a server that never loaded the world from one that is running
     and publishes no pose: joint states come from the same server, paused or
     not, and poses do not come at all from one with no scene broadcaster.
-    'subscriptions' is how many subscribers the poses had (see 'RESUBSCRIBE').
+    'subscriptions' is how many subscribers the poses had (see 'RESUBSCRIBE'),
+    and 'discovery' where the run's discovery was ('discovery_said').
     """
     wrote = (" The server wrote:\n%s" % tail) if tail else ""
     if read:
@@ -876,12 +984,13 @@ def no_first_reading(world, topic, partition, waited, read, seen, streams, behin
         )
     head = (
         "Gazebo published no poses for world '%s' within %.0f s of being started, so there is nothing to report:"
-        " nothing came on '%s' in the transport partition '%s'%s."
+        " nothing came on '%s' in the transport partition '%s'%s%s."
         % (
             world,
             waited,
             topic,
             partition,
+            discovery,
             " to any of the %d subscribers it had" % subscriptions if subscriptions > 1 else "",
         )
     )
@@ -2776,6 +2885,7 @@ def process(path, request):
                     behind,
                     said.tail(0),
                     subscriptions,
+                    discovery_said(run_env),
                 )
             if deadline.passed():
                 return (
