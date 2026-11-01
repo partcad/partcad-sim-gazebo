@@ -23,6 +23,7 @@ import math
 import os
 import socket
 import sys
+import threading
 
 import pytest
 
@@ -179,6 +180,15 @@ def test_a_failure_says_where_the_runs_discovery_was():
     assert sim.discovery_said({}) == ""
 
 
+def test_a_failure_says_where_discovery_was_set_up_in_the_older_spelling_too():
+    """A user's 'IGN_' ports, kept for the generation that reads them, are the ones its run discovered on."""
+    environment, _partition = sim.run_environment(
+        {"IGN_DISCOVERY_MSG_PORT": "11317", "IGN_DISCOVERY_SRV_PORT": "11318"}, token="abc"
+    )
+
+    assert sim.discovery_said(environment) == " (discovery on ports 11317 and 11318)"
+
+
 def test_the_server_and_every_subscriber_are_started_in_it(monkeypatch, tmp_path):
     """All of them, or the ones left out hear nothing at all; checked by
     starting nothing and recording what would have been started."""
@@ -306,9 +316,27 @@ def test_in_gazebo_two_runs_of_one_world_at_once_each_report_only_themselves(gaz
 
 def test_in_gazebo_runs_at_once_each_discover_on_ports_of_their_own(gazebo, tmp_path, monkeypatch):
     """Six runs of one world side by side, as 'pc test' starts a package's simulations: each on a pair of discovery
-    ports no other run has, and each reading only its own world -- its block falling from its own height."""
+    ports no other run has, and each reading only its own world -- its block falling from its own height.
+
+    Two runs may pick one pair before either server binds it, which only shares their discovery, as every run did
+    before; that is not what is under test here, so the pairs handed out are kept distinct, each still picked and
+    probed by 'discovery_ports' itself."""
     for name in sim.DISCOVERY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+    picked = sim.discovery_ports
+    handed = set()
+    lock = threading.Lock()
+
+    def distinct(environment, token):
+        with lock:
+            for attempt in range(20):
+                pair = picked(environment, "%s-%d" % (token, attempt))
+                if pair is not None and pair not in handed:
+                    handed.add(pair)
+                    return pair
+        return None
+
+    monkeypatch.setattr(sim, "discovery_ports", distinct)
     environments = []
     started = sim.run_environment
 

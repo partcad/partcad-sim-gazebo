@@ -117,7 +117,7 @@ is handed poses that were not its own. A `GZ_PARTITION` you have set (or
 `<yours>:partcad-<random>`, rather than used as it is, which would put every run
 back into one.
 
-Every run also has **discovery ports** of its own (`GZ_DISCOVERY_MSG_PORT` and
+Every run also gets **discovery ports** of its own (`GZ_DISCOVERY_MSG_PORT` and
 `GZ_DISCOVERY_SRV_PORT`, a pair at random from 61000-65535 that nothing is
 bound to). A partition keeps runs from reading each other, but not from
 hearing each other: every Gazebo process on a machine is sent every other's
@@ -125,7 +125,9 @@ discovery traffic, whatever its partition. With sixteen runs at once that
 overflows each process's socket buffer, and what is dropped can leave a
 subscriber that never hears its server (below). Discovery you have set up
 yourself -- either of those two variables, `GZ_DISCOVERY_MULTICAST_IP` or
-`GZ_RELAY`, or their `IGN_` spellings -- is left as it is.
+`GZ_RELAY`, or their `IGN_` spellings -- is left as it is, and so are the
+defaults when eight pairs tried in a row are all taken: such a run shares its
+discovery as every run used to, and its partition still keeps it apart.
 
 ### Joints
 
@@ -587,8 +589,9 @@ publishes in another transport partition. So nothing here waits blindly:
   pose at all ten seconds after its server started subscribes again, and again
   twice as long after that, inside `startup_timeout`. The world is paused until
   the first reading, so nothing is missed, and `warnings` says it happened.
-  Discovery ports of each run's own (above) make a lost registration much
-  rarer, and this is what is left for one that is lost all the same. Reported
+  Discovery ports of a run's own, where it gets them (above), make a lost
+  registration much rarer, and this is what is left for one that is lost all
+  the same. Reported
   upstream as
   [gazebosim/gz-transport#985](https://github.com/gazebosim/gz-transport/issues/985).
   The same goes for a model's joint states: Gazebo publishes them every step of
@@ -603,9 +606,9 @@ publishes in another transport partition. So nothing here waits blindly:
   that nothing answered is made again, up to three times, before the run
   fails saying the world would not be set running.
 - **A first reading that does not come within `startup_timeout`** fails the
-  run, saying which topic it listened on, in which partition and on which
-  discovery ports, and what did
-  come: a server whose joint states arrive and whose poses do not is running,
+  run, saying what did come -- and, when no pose came at all, which topic it
+  listened on, in which partition and on which discovery ports: a server
+  whose joint states arrive and whose poses do not is running,
   and has no scene broadcaster or never heard the run subscribe; pose messages
   that came with no first reading taken from them are counted, and each joint
   stream that had only a later instant to give is named.
