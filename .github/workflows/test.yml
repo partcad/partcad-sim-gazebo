@@ -1,9 +1,13 @@
-# What this package can be checked for without a Gazebo in the room.
+# What this package can be checked for without a Gazebo in the room, and then
+# with one.
 #
-# Gazebo is a native program rather than a wheel, so there is no end-to-end run
-# here and the test files say so themselves. What is left is nearly all of this
-# package: the reader, the writer, and the parsing that turns what the server
-# says into what PartCAD reads.
+# Gazebo is a native program rather than a wheel, so the `pytest` job runs no
+# Gazebo, and every test that starts one is skipped there. What is left is
+# nearly all of this package: the reader, the writer, and the parsing that
+# turns what the server says into what PartCAD reads. The `gazebo` job runs the
+# same tests again in the image the simulation runs in, where those are not
+# skipped: the worlds the exporter writes, loaded and run, and checked against
+# physics with a known answer.
 #
 # Nightly as well as on a push, because half of what is under test is written
 # against PartCAD's sandbox contract -- `ocp_serialize`, `urdf_common`,
@@ -64,3 +68,21 @@ jobs:
 
       - name: Run the tests
         run: pytest -v
+
+  # The real-Gazebo half, in the image PartCAD runs a simulation in, on what is
+  # published as `latest` -- the image every simulation pulls. A change to the
+  # image itself is tested on the image it builds, by `image.yml`, with the same
+  # script. amd64 alone: `image.yml` runs this on arm64 as well, whenever the
+  # image changes or is rebuilt.
+  gazebo:
+    runs-on: ubuntu-latest
+    # The whole suite takes some three minutes there, the install included.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pull the image
+        run: docker pull ghcr.io/partcad/partcad-sim-gazebo:latest
+
+      - name: Run the tests in it
+        run: container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest

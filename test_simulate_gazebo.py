@@ -32,6 +32,15 @@ import pytest
 from xml.etree import ElementTree
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# PartCAD's sandbox contract, which a run imports ('gazebo_common' is written
+# against it), from the installed 'partcad' or from PYTHONPATH where there is
+# none -- as 'test_safety.py' finds it.
+try:
+    import partcad as pc
+
+    sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
+except ImportError:
+    pass
 
 import simulate_gazebo as sim  # noqa: E402
 

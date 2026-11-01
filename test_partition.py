@@ -12,14 +12,10 @@ handed poses that were not its own. So every run gets a partition of its own.
 
 The environment that does it is checked without a Gazebo. The last test runs two
 same-named worlds side by side in a real one and checks that each reports only
-itself; it is skipped without a Gazebo, which CI's runners do not have. Run it in
-the image the simulation uses:
+itself; it is skipped without a Gazebo, and run in the image the simulation
+uses, as CI runs it (see 'Tests' in the README):
 
-    docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 \\
-        --entrypoint bash \\
-        ghcr.io/partcad/partcad-sim-gazebo:latest -c \\
-        'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \\
-         && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_partition.py'
+    container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest test_partition.py
 """
 
 import concurrent.futures
@@ -30,6 +26,15 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# PartCAD's sandbox contract, which a run imports ('gazebo_common' is written
+# against it), from the installed 'partcad' or from PYTHONPATH where there is
+# none -- as 'test_safety.py' finds it.
+try:
+    import partcad as pc
+
+    sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
+except ImportError:
+    pass
 
 import simulate_gazebo as sim  # noqa: E402
 

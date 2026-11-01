@@ -449,14 +449,10 @@ def test_a_budget_that_is_not_one_is_none(value):
 #
 # In a real Gazebo
 #
-# Skipped without one, which CI's runners do not have; run it in the image the
-# simulation uses, with PartCAD's sandbox modules on the path:
+# Skipped without one, and run in the image the simulation uses, as CI runs it
+# (see 'Tests' in the README):
 #
-#     docker run --rm -v "$PWD:/w" -v "<partcad>/src/partcad/wrappers:/wrappers:ro" -w /w \
-#         -e PYTHONDONTWRITEBYTECODE=1 -e PYTHONPATH=/wrappers --entrypoint bash \
-#         ghcr.io/partcad/partcad-sim-gazebo:latest -c \
-#         'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest numpy \
-#          && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_safety.py'
+#     container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest test_safety.py
 #
 
 REFUSED = """<?xml version="1.0"?>
