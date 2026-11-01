@@ -582,6 +582,12 @@ def test_a_silent_stream_that_speaks_is_waited_for_again():
         threading.Thread(target=stream.follow, args=(reader,), daemon=True).start()
         writer.write(stamped(0.5) + stamped(0.6))
         writer.flush()
+        # Heard from, which is what clears it: the first message is whole once
+        # the second starts.
+        deadline = time.monotonic() + 5
+        while stream.silent and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not stream.silent
 
         def catch_up():
             time.sleep(0.2)
