@@ -410,8 +410,10 @@ def _unbound(port):
 
 
 def discovery_said(environment):
-    """Where a run's discovery is, for a failure to say: its ports, when it has some of its own."""
-    topics, services = (environment.get(names[0]) for names in DISCOVERY_PORT_VARIABLES)
+    """Where a run's discovery is, for a failure to say: its ports, when it has both set, in either spelling."""
+    topics, services = (
+        next((environment[name] for name in names if environment.get(name)), None) for names in DISCOVERY_PORT_VARIABLES
+    )
     return " (discovery on ports %s and %s)" % (topics, services) if topics and services else ""
 
 
