@@ -5,9 +5,9 @@
 # where there is none, and a CI runner has none.
 #
 # One script, run by the `gazebo` job of `test.yml` against the published
-# image, and by `image.yml` against the image a change to `container/` has just
-# built, so that the image and the code are each tested against the other's
-# current state with one recipe. Run it by hand the same way, from the root of
+# image, and by `image.yml` against every image it builds -- the one a change to
+# `container/` has just built, and the one it publishes -- so that the image and
+# the code are each tested against the other's current state with one recipe. Run it by hand the same way, from the root of
 # a checkout:
 #
 #     container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest
