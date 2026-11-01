@@ -705,8 +705,9 @@ container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest [pytest arguments]
 ```
 
 CI runs it on every push and pull request against the published image (the
-`gazebo` job of `test.yml`), and against the image a change to `container/` has
-just built (`image.yml`). It fails if any test was skipped for want of a
+`gazebo` job of `test.yml`), and against every image `image.yml` builds: the
+one a change to `container/` has just built, and the one it publishes, before
+`latest` moves to it. It fails if any test was skipped for want of a
 Gazebo, which is what an image whose Gazebo this plugin cannot find would
 otherwise do, and pass.
 
