@@ -15,6 +15,11 @@
 # architecture is pushed by digest, untagged, and 'latest' is then one
 # manifest list naming both.
 #
+# What the `image` job builds is also run with this package's tests
+# (`container/test.sh`): its Gazebo has to load and run the worlds the exporter
+# writes, which proves more than the one falling box `container/check.sh`
+# drops.
+#
 # Weekly as well, because the base image moves: `ros:jazzy-ros-base` and the
 # ROS packages on it are rebuilt with every ROS sync, and an image that is
 # never rebuilt quietly ages into a Gazebo nobody chose.
@@ -58,6 +63,8 @@ jobs:
             runner: ubuntu-24.04-arm
     name: image (${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
+    # A build, the check, and the tests, which take some three minutes there.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
 
@@ -66,6 +73,9 @@ jobs:
 
       - name: Check
         run: container/check.sh "$IMAGE:latest"
+
+      - name: Test
+        run: container/test.sh "$IMAGE:latest"
 
   # A job of its own, so that the permission to push packages is granted to
   # nothing that runs on a pull request. It builds again rather than handing an

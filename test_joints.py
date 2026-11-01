@@ -23,13 +23,10 @@ reads, and the places that is quietly wrong are all on this side of the pipe --
 
 The last test is the end-to-end one: a pendulum and a slider in a real Gazebo,
 checked against physics with a known answer. It is skipped without a Gazebo,
-which CI's runners do not have; run it in the image the simulation uses:
+and run in the image the simulation uses, as CI runs it (see 'Tests' in
+the README):
 
-    docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 \\
-        --entrypoint bash \\
-        ghcr.io/partcad/partcad-sim-gazebo:latest -c \\
-        'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \\
-         && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py'
+    container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest test_joints.py
 """
 
 import math
@@ -42,6 +39,15 @@ from xml.etree import ElementTree
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+# PartCAD's sandbox contract, which a run imports ('gazebo_common' is written
+# against it), from the installed 'partcad' or from PYTHONPATH where there is
+# none -- as 'test_safety.py' finds it.
+try:
+    import partcad as pc
+
+    sys.path.append(os.path.join(os.path.dirname(pc.__file__), "wrappers"))
+except ImportError:
+    pass
 
 import simulate_gazebo as sim  # noqa: E402
 
@@ -673,4 +679,8 @@ def test_in_gazebo_a_world_of_free_models_reports_no_joints(gazebo, tmp_path):
 
     assert result["before"]["joints"] == {}
     assert result["after"]["joints"] == {}
-    assert "warnings" not in result
+    # Nothing about joints; and, the world being written by hand, with no names
+    # beside it, why it has no loads.
+    assert result["warnings"] == [
+        "no loads are reported: they are read for a world PartCAD exported, with its names beside it"
+    ]

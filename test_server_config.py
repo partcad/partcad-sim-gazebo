@@ -19,14 +19,10 @@ So a server is pointed at the installed configuration wherever the home has no
 copy, and reads it where it is; a copy that is there is read as it is, unless
 it is no configuration at all. The choice is checked without a Gazebo, with
 directories that stand for an installation and a home. The last tests run a
-real Gazebo, and are skipped without one, which CI's runners do not have; run
-them in the image the simulation uses:
+real Gazebo, and are skipped without one, and run in the image the simulation
+uses, as CI runs them (see 'Tests' in the README):
 
-    docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 \\
-        --entrypoint bash \\
-        ghcr.io/partcad/partcad-sim-gazebo:latest -c \\
-        'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \\
-         && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_server_config.py'
+    container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest test_server_config.py
 """
 
 import os

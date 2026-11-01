@@ -38,14 +38,10 @@ What is checked, each against an answer that does not come from the exporter:
   the swinging bar has the rates against it that the engine's own velocities
   give, and a nut on a screw moves as its thread says.
 
-The last are skipped without a Gazebo, which CI's runners do not have; run them
-in the image the simulation uses, with PartCAD in the environment:
+The last are skipped without a Gazebo, and run in the image the simulation
+uses, as CI runs them (see 'Tests' in the README):
 
-    docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 \\
-        --entrypoint bash \\
-        ghcr.io/partcad/partcad-sim-gazebo:latest -c \\
-        'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest numpy partcad \\
-         && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_export_joints.py'
+    container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest test_export_joints.py
 """
 
 import asyncio
@@ -833,6 +829,27 @@ OBLIQUE = [3.0, -4.0, -9.0]
 STEP = 0.001
 
 
+# What a run of a world exported with its names says of the loads it reads
+# whatever the world holds: what Gazebo cannot measure of them ('fill_loads' and
+# 'process' in 'simulate_gazebo.py'; 'test_loads.py' is where they are under
+# test). Every scene here holds its subject to the world, which is the first.
+# The runs here are about joints and readings, and are held to warning of
+# nothing else ('_warned').
+LOADS_CAVEATS = (
+    "what holds 'subject' to the world is not among its loads: Gazebo makes no force-torque sensor on a joint to the"
+    " world",
+    "the first reading's loads are its bodies' weights alone: it is taken while the world is paused, and Gazebo's"
+    " force-torque sensors measure nothing then",
+    "a body's contacts are not among its loads, and neither is its acceleration: this plugin reads neither from"
+    " Gazebo, so a body's loads need not add up to anything",
+)
+
+
+def _warned(result):
+    """What a run warned of besides 'LOADS_CAVEATS'."""
+    return [warning for warning in result.get("warnings", []) if warning not in LOADS_CAVEATS]
+
+
 def _run(module, directory, tree, physics=None, **request):
     """'tree' exported as a run exports it, and run in Gazebo: what 'pc sim' hands the validation."""
     import simulate_gazebo
@@ -898,7 +915,7 @@ def test_in_gazebo_a_joint_started_away_from_its_zero_reads_its_start(
             assert "quat" in state
         for body in found:
             assert _close_pose(_body(reading, body.name), body.world, 1e-6), body.name
-    assert "warnings" not in result
+    assert _warned(result) == []
 
 
 @pytest.mark.parametrize("label, bore, params, kind", NATIVE_ROWS, ids=_ids(NATIVE_ROWS))
@@ -1226,7 +1243,7 @@ def test_in_gazebo_a_floating_child_s_rates_against_a_body_that_turns_are_the_en
     lid, arm = found.by_name("lid"), found.by_name("arm")
     assert lid.is_floating and lid.joint_parent is arm
     result = _run(export_world, tmp_path, tree, duration=0.25, samples=30, gravity=[0.0, 0.0, -G])
-    assert "warnings" not in result
+    assert _warned(result) == []
 
     readings = _readings(result)
     names = lid.joint.parameter_names()
@@ -1357,7 +1374,7 @@ def test_in_gazebo_every_sample_asked_for_comes_back_one_a_step(gazebo, tmp_path
     # poses by the wall clock and having just published the paused world's.
     assert times == sorted(set(times))
     assert all(0.001 * (index + 1) - 1e-9 <= time_ <= 0.001 * (index + 2) + 1e-9 for index, time_ in enumerate(times))
-    assert "warnings" not in result
+    assert _warned(result) == []
 
 
 def test_in_gazebo_a_timestep_is_the_step_gazebo_takes(gazebo, tmp_path, stand_in_geometry, export_world):

@@ -697,6 +697,19 @@ cannot hold: nothing about the part is lost by a world that has no fluid in it.
 pytest
 ```
 
+Every test that starts a Gazebo is skipped where there is none. They run in the
+image the simulation itself uses, by one script, from the root of a checkout:
+
+```shell
+container/test.sh ghcr.io/partcad/partcad-sim-gazebo:latest [pytest arguments]
+```
+
+CI runs it on every push and pull request against the published image (the
+`gazebo` job of `test.yml`), and against the image a change to `container/` has
+just built (`image.yml`). It fails if any test was skipped for want of a
+Gazebo, which is what an image whose Gazebo this plugin cannot find would
+otherwise do, and pass.
+
 `test_safety.py` proves each of the nets in "When a run goes wrong" with a fake
 `gz` -- a few lines of Python found through `PC_GZ` -- that dies before its first
 pose, hangs while it starts, says it loaded no systems, publishes joint states
@@ -705,8 +718,10 @@ that every program it was run as is gone afterwards. It needs
 nothing but the standard library and a POSIX system. Its last test runs a world a
 real Gazebo refuses, and is skipped without one, like the ones below.
 
-`test_simulate_gazebo.py` needs nothing but the standard library and says why an
-end-to-end run is not among what it checks. `test_snapshot.py` needs numpy,
+`test_simulate_gazebo.py` says why an end-to-end run is not among what it checks.
+It needs `partcad` for the tests that start a run, as do `test_joints.py` and
+`test_partition.py`: a run reads the world's gravity through `gazebo_common`,
+which is written against `urdf_common`. `test_snapshot.py` needs numpy,
 `imageio-ffmpeg` for the videos, and `partcad` for the half that reads a world:
 it places one by pose messages a real `gz topic -e` printed, and films it by a
 stream of them. Its tests of the renderer are the MuJoCo plugin's, over the
@@ -717,18 +732,9 @@ that lives there — `ocp_serialize`, `urdf_common`, `mass_properties` and
 installs it from PartCAD's `devel` branch, so that a change to that contract
 fails here before it is released.
 
-`test_joints.py` needs nothing but the standard library for everything but its
-last few tests, which run a pendulum and a slider in a real Gazebo and check
-their `joints` against physics with a known answer. Those are skipped where
-there is no Gazebo — CI's runners have none — and run in the image the
-simulation itself uses:
-
-```shell
-docker run --rm -v "$PWD:/w" -w /w -e PYTHONDONTWRITEBYTECODE=1 --entrypoint bash \
-    ghcr.io/partcad/partcad-sim-gazebo:latest -c \
-    'python3 -m venv /tmp/v && /tmp/v/bin/pip install -q pytest \
-     && /tmp/v/bin/python -m pytest -v -p no:cacheprovider test_joints.py test_simulate_gazebo.py test_partition.py test_loads.py'
-```
+`test_joints.py` reads hand-written worlds' joints, and its last few tests run
+a pendulum and a slider in a real Gazebo and check their `joints` against
+physics with a known answer.
 
 `test_export_joints.py` builds mechanisms with PartCAD's own ASSY code, a
 stand-in for every part's geometry, and checks every row of the table above,
@@ -750,8 +756,7 @@ stop holds a hinge where PartCAD says, not where its start would; a carriage
 falls from its start to its stop; a floating child falls free, at g·t; a lid
 falling free beside the swinging bar has, against the bar, the rates the
 engine's own velocities give and turns at the bar's speed; and a nut on a screw
-moves 10 mm a turn. In the image, `pip install -q pytest numpy partcad`
-and run it as above.
+moves 10 mm a turn.
 
 `test_loads.py` checks the force-torque sensors a run adds to a world — one
 on every joint between two bodies, none on a static model's, the system once
