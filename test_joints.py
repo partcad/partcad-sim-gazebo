@@ -565,6 +565,33 @@ def test_a_stream_listened_to_again_after_it_ended_is_waited_for_again():
         assert sim.message_time(stream.at(1.0, patience=5)) == pytest.approx(1.0)
 
 
+def test_a_stream_given_no_time_to_speak_in_is_not_taken_for_silent():
+    """A reading's wait spent on the streams before it ('fill'): the next reading still waits for this one."""
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
+
+    assert stream.at(1.0, patience=0) is None
+    assert not stream.silent
+
+
+def test_a_silent_stream_that_speaks_is_waited_for_again():
+    """Taken for silent after a wait it said nothing in, and then heard from: a reading waits for it to catch up."""
+    stream = sim.JointStream(rig(swing=("revolute", "revolute")))
+    assert stream.at(1.0, patience=0.1) is None and stream.silent
+    read, write = os.pipe()
+    with os.fdopen(read) as reader, os.fdopen(write, "w") as writer:
+        threading.Thread(target=stream.follow, args=(reader,), daemon=True).start()
+        writer.write(stamped(0.5) + stamped(0.6))
+        writer.flush()
+
+        def catch_up():
+            time.sleep(0.2)
+            writer.write(stamped(1.0) + stamped(1.1))
+            writer.flush()
+
+        threading.Thread(target=catch_up, daemon=True).start()
+        assert sim.message_time(stream.at(1.0, patience=5)) == pytest.approx(1.0)
+
+
 def test_what_no_reading_can_ask_for_any_more_is_forgotten():
     """Which is everything before the latest message at or before a pose already
     seen: a reading is never asked for at an earlier instant than that."""

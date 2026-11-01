@@ -2140,6 +2140,8 @@ class JointStream:
                     self.entries.append((stamp, text))
                     self.newest = stamp
                     self.count += 1
+                    # Whatever a wait took it for: it is waited for again.
+                    self.silent = False
                     self.condition.notify_all()
         except (OSError, ValueError):
             # Closed under it, which is one of the ways a run ends.
@@ -2151,12 +2153,18 @@ class JointStream:
                     self.condition.notify_all()
 
     def _wait(self, reached, patience):
-        """Wait, holding the condition, until 'reached()', the stream ends, or 'patience' runs out."""
+        """Wait, holding the condition, until 'reached()', the stream ends, or 'patience' runs out.
+
+        A stream that said nothing for all of a wait is taken for silent, and
+        not waited for again until it speaks; one that was given no time to
+        say anything in -- a reading's wait spent on the streams before it
+        ('fill') -- is not.
+        """
         deadline = time.monotonic() + patience
         while not self.ended and not self.silent and not reached():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                self.silent = self.newest is None
+                self.silent = self.newest is None and patience > 0
                 break
             self.condition.wait(remaining)
 
