@@ -588,6 +588,22 @@ def test_a_reading_is_filled_from_every_stream_and_a_silent_one_is_named():
     assert warnings == ["the joints of model 'other' are not reported: Gazebo published no joint states for it"]
 
 
+def test_a_reading_waits_for_its_streams_once_between_them():
+    """They run alongside each other, so two that say nothing cost one wait and not two."""
+    reading = {"time": 3.5, "bodies": {}, "joints": {}}
+    silent = [
+        sim.JointStream(sim.JointModel(model, "/t/%d" % index, {"lift": ("prismatic", "lift", "prismatic")}))
+        for index, model in enumerate(("one", "two"))
+    ]
+    warnings = []
+
+    started = time.monotonic()
+    sim.fill(reading, silent, warnings, patience=0.5)
+
+    assert 0.5 <= time.monotonic() - started < 0.9
+    assert len(warnings) == 2
+
+
 #
 # In a real Gazebo
 #

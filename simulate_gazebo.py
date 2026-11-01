@@ -2524,9 +2524,11 @@ def posed_states(reading, names, links, warnings, patience=PATIENCE):
 def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=None):
     """State in 'reading' where the joints of every stream were at its instant.
 
-    'patience' is how long to wait for a stream that has not got that far yet
-    (see 'JointStream.at'); nothing is worth waiting for once the server that
-    publishes them has gone. A ball and a floating child are read from the
+    'patience' is how long to wait for the streams that have not got that far
+    yet (see 'JointStream.at'), between them: they run alongside each other,
+    so one wait serves them all, and a stream that says nothing does not make
+    the next one wait as long again. Nothing is worth waiting for once the
+    server that publishes them has gone. A ball and a floating child are read from the
     reading's own bodies, and their speeds from their models' link streams
     ('posed_states').
 
@@ -2537,6 +2539,11 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
     such stream is put in 'late', a dict, if one is given: its model's name,
     and the time of the state it had to give instead.
     """
+    until = time.monotonic() + patience
+
+    def left():
+        return max(0.0, until - time.monotonic())
+
     links = {}
     in_step = True
     for stream in streams:
@@ -2546,7 +2553,7 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
         if stream.model.links:
             links[stream.model.scoped] = stream
             continue
-        text = stream.at(reading["time"], patience)
+        text = stream.at(reading["time"], left())
         if text is None:
             note(
                 warnings,
@@ -2563,7 +2570,7 @@ def fill(reading, streams, warnings, patience=PATIENCE, names=AS_WRITTEN, late=N
             if late is not None:
                 late[stream.model.shown] = stamp
         reading["joints"].update(joint_states(parse_message(text), stream.model, warnings))
-    posed_states(reading, names, links, warnings, patience)
+    posed_states(reading, names, links, warnings, left())
     return in_step
 
 
@@ -2835,8 +2842,17 @@ def process(path, request):
                             _signal_group(stale, signal.SIGTERM)
                             later = RESUBSCRIBE * 2 ** (stream.subscriptions - 1)
                             joints_resubscribe_at[stream] = time.monotonic() + later
+                    # What the streams that do speak say meanwhile, a message
+                    # every step, is kept only as far as a reading can still
+                    # ask for it, as after the first reading.
+                    for stream in streams:
+                        stream.forget_before(reading["time"])
                     continue
-                if not fill(reading, streams, warnings, patience(), names, behind):
+                # Not past 'startup_timeout' either, which the first reading
+                # is held to.
+                if not fill(
+                    reading, streams, warnings, min(patience(), max(0.0, first_by - time.monotonic())), names, behind
+                ):
                     # A joint stream that began after this instant has only a
                     # later step to give, so the joints would be a step from
                     # where the bodies are: 'before' is the first instant

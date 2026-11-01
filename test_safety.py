@@ -482,6 +482,18 @@ def test_joint_states_a_running_server_never_sends_are_subscribed_to_again(gazeb
     assert_nothing_outlived_the_run(gazebo)
 
 
+def test_a_joint_subscriber_that_never_hears_is_waited_for_no_longer_than_startup_timeout(gazebo, tmp_path):
+    """A 'startup_timeout' shorter than the ten seconds a stream is given bounds the first reading all the same."""
+    gazebo("silent-joints")
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.0)
+
+    assert error is None and took < 3
+    assert result["before"]["time"] == 0.0
+    assert any("published no joint states for it" in warning for warning in result["warnings"])
+    assert_nothing_outlived_the_run(gazebo)
+
+
 def test_a_joint_subscriber_that_never_hears_costs_a_warning_and_a_bounded_wait(gazebo, tmp_path, monkeypatch):
     """Subscribed to again while there is time to, and then read without, inside 'startup_timeout'."""
     gazebo("silent-joints")
