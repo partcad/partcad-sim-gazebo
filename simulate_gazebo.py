@@ -2743,11 +2743,11 @@ def process(path, request):
         resubscribe_at = waiting_since + RESUBSCRIBE
         # When each stream of joint states that has said nothing is subscribed
         # to again (see 'RESUBSCRIBE'), on the poses' schedule; and how long
-        # the first reading may wait for it to say something -- for as long as
-        # there is time after that to give it its 'PATIENCE' and still read the
-        # world within 'startup_timeout'.
+        # the first reading may wait for it to say something -- until a moment
+        # short of 'startup_timeout', so that every re-subscription due inside
+        # it is made, and the world is still read in time.
         joints_resubscribe_at = {stream: resubscribe_at for stream in joint_state_streams}
-        hold_until = first_by - PATIENCE
+        hold_until = first_by - POLL
 
         def out_of_time():
             """The failure a run that has waited as long as it may fails with, or None."""

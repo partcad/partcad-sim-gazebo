@@ -579,10 +579,9 @@ publishes in another transport partition. So nothing here waits blindly:
   The same goes for a model's joint states: Gazebo publishes them every step of
   a paused world too, so a stream of them that says nothing while the poses come
   is a subscriber the server never registered. The first reading waits for it,
-  subscribing again on the same schedule, for as long as there is time left to
-  give it ten seconds more and still read the world within `startup_timeout`;
-  one that still says nothing is named in `warnings`, with how many subscribers
-  it had, and the run goes on without those joints. A joint's wrench and a
+  subscribing again on the same schedule, until a moment short of
+  `startup_timeout`; one that still says nothing is named in `warnings`, with
+  how many subscribers it had, and the run goes on without those joints. A joint's wrench and a
   model's link poses come only once the world runs, so their silence before
   the first reading says nothing, and they are not subscribed to again.
   A service is found the same way, so a call to the world's control service

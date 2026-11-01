@@ -482,6 +482,21 @@ def test_joint_states_a_running_server_never_sends_are_subscribed_to_again(gazeb
     assert_nothing_outlived_the_run(gazebo)
 
 
+def test_joint_states_are_subscribed_to_again_inside_a_startup_timeout_shorter_than_their_patience(
+    gazebo, tmp_path, monkeypatch
+):
+    """Every re-subscription due inside 'startup_timeout' is made, not only those ten seconds short of it."""
+    gazebo("deaf-joints")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=1.5)
+
+    assert error is None and took < 5
+    assert "swing" in result["before"]["joints"]
+    assert any("once they were subscribed to again (2 subscribers in all)" in w for w in result["warnings"])
+    assert_nothing_outlived_the_run(gazebo)
+
+
 def test_a_joint_subscriber_that_never_hears_is_waited_for_no_longer_than_startup_timeout(gazebo, tmp_path):
     """A 'startup_timeout' shorter than the ten seconds a stream is given bounds the first reading all the same."""
     gazebo("silent-joints")
