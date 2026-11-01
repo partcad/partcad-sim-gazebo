@@ -81,14 +81,18 @@ def crash_without_a_core():
     # 'core_pattern' that pipes the core to a program -- systemd-coredump on
     # GitHub's Ubuntu runners, apport on a desktop -- which is run whatever the
     # limit says, and took the server seconds to die there. A process that is
-    # not dumpable has no core written anywhere.
+    # not dumpable has no core written anywhere. Linux's word for it; another
+    # system with such a helper would want its own. A 'prctl' that fails says
+    # so rather than raising, so the fake says so and exits, rather than crash
+    # into the very wait it is here to stay out of.
     resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
-    try:
+    if sys.platform.startswith("linux"):
         import ctypes
 
-        ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE, 0: Linux only
-    except (AttributeError, OSError):
-        pass
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE, 0
+            sys.stderr.write("the fake could not make itself undumpable: errno %%d\n" %% ctypes.get_errno())
+            sys.exit(1)
 
 
 def remember(pid):
