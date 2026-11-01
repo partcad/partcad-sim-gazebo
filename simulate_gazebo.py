@@ -2744,8 +2744,9 @@ def process(path, request):
         # When each stream of joint states that has said nothing is subscribed
         # to again (see 'RESUBSCRIBE'), on the poses' schedule; and how long
         # the first reading may wait for it to say something -- until a moment
-        # short of 'startup_timeout', so that every re-subscription due inside
-        # it is made, and the world is still read in time.
+        # short of 'startup_timeout', and past that only to make a
+        # re-subscription due before it, so that every one due inside it is
+        # made, and the world is still read in time.
         joints_resubscribe_at = {stream: resubscribe_at for stream in joint_state_streams}
         hold_until = first_by - POLL
 
@@ -2835,7 +2836,9 @@ def process(path, request):
                 seen = reading["time"]
                 behind.clear()
                 unheard = [stream for stream in joint_state_streams if not stream.count]
-                if unheard and time.monotonic() < hold_until:
+                if unheard and (
+                    time.monotonic() < hold_until or any(joints_resubscribe_at[stream] < first_by for stream in unheard)
+                ):
                     # Not a word from a stream of joint states, while the
                     # poses come from the same server: a subscriber it may
                     # never have registered. The first reading waits for it,

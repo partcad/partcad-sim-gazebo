@@ -497,6 +497,19 @@ def test_joint_states_are_subscribed_to_again_inside_a_startup_timeout_shorter_t
     assert_nothing_outlived_the_run(gazebo)
 
 
+def test_a_joint_re_subscription_due_in_the_last_moment_of_startup_timeout_is_made(gazebo, tmp_path, monkeypatch):
+    """Due after the hold would have ended and before 'startup_timeout': made, and the joints are in the reading."""
+    gazebo("deaf-joints")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, took = run(tmp_path, world=JOINTED, startup_timeout=0.6)
+
+    assert error is None and took < 5
+    assert "swing" in result["before"]["joints"]
+    assert any("once they were subscribed to again (2 subscribers in all)" in w for w in result["warnings"])
+    assert_nothing_outlived_the_run(gazebo)
+
+
 def test_a_joint_subscriber_that_never_hears_is_waited_for_no_longer_than_startup_timeout(gazebo, tmp_path):
     """A 'startup_timeout' shorter than the ten seconds a stream is given bounds the first reading all the same."""
     gazebo("silent-joints")
