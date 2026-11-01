@@ -75,8 +75,14 @@ args = sys.argv[1:]
 
 
 def remember(pid):
+    # What it was asked, and on its next line where in gz-transport it was
+    # asked it: the partition and the discovery ports it was started with.
     with open(os.path.join(os.environ["FAKE_GZ_PIDS"], str(pid)), "w") as f:
-        f.write(" ".join(args))
+        f.write(" ".join(args) + "\n")
+        f.write(" ".join(
+            "=".join((name, os.environ.get(name, "")))
+            for name in ("GZ_PARTITION", "GZ_DISCOVERY_MSG_PORT", "GZ_DISCOVERY_SRV_PORT")
+        ))
 
 
 def pose(t, z):
@@ -482,6 +488,36 @@ def test_joint_states_a_running_server_never_sends_are_subscribed_to_again(gazeb
     assert_nothing_outlived_the_run(gazebo)
 
 
+def test_every_program_of_a_run_is_started_on_its_partition_and_its_discovery_ports(gazebo, tmp_path, monkeypatch):
+    """The server, both subscribers to the joints, the poses' and the control service's call: one partition, one
+    pair of ports, and not gz-transport's own. A program left on the defaults would discover nothing of its run's
+    and hang -- the re-subscription and the service call are here because they are started apart from the rest."""
+    for name in sim.DISCOVERY_VARIABLES:
+        monkeypatch.delenv(name, raising=False)
+    gazebo("deaf-joints")
+    monkeypatch.setattr(sim, "RESUBSCRIBE", 0.5)
+
+    result, error, _ = run(tmp_path, world=JOINTED)
+
+    assert error is None
+    started = _invocations(gazebo, transport=True)
+    asked = sorted(
+        "poses" if args[-1].endswith("/pose/info") else "joints" if "/joint_state/" in args[-1] else args[0]
+        for args, _ in started
+    )
+    # The server twice: 'gz sim' and the server it starts of its own, both
+    # remembered by it with its environment.
+    assert asked == ["joints", "joints", "poses", "service", "sim", "sim"]
+    transports = {tuple(sorted(where.items())) for _, where in started}
+    assert len(transports) == 1
+    (where,) = [dict(t) for t in transports]
+    assert where["GZ_PARTITION"].startswith("partcad-")
+    topics, services = int(where["GZ_DISCOVERY_MSG_PORT"]), int(where["GZ_DISCOVERY_SRV_PORT"])
+    assert services == topics + 1
+    assert sim.DISCOVERY_PORTS[0] <= topics < services <= sim.DISCOVERY_PORTS[1]
+    assert_nothing_outlived_the_run(gazebo)
+
+
 def test_joint_states_are_subscribed_to_again_inside_a_startup_timeout_shorter_than_their_patience(
     gazebo, tmp_path, monkeypatch
 ):
@@ -590,12 +626,20 @@ def test_in_gazebo_a_world_the_server_refuses_fails_at_once_quoting_the_server(r
     assert "\x1b[" not in message
 
 
-def _invocations(gazebo):
-    """What every program the fake was run as was asked to do, as its arguments."""
+def _invocations(gazebo, transport=False):
+    """What every program the fake was run as was asked to do, as its arguments.
+
+    With 'transport', each with the partition and discovery ports it was
+    started with, as a dict beside them.
+    """
     out = []
     for name in os.listdir(gazebo.pids):
         with open(os.path.join(gazebo.pids, name), encoding="utf-8") as f:
-            out.append(f.read().split())
+            asked, _, where = f.read().partition("\n")
+        if transport:
+            out.append((asked.split(), dict(pair.split("=", 1) for pair in where.split())))
+        else:
+            out.append(asked.split())
     return out
 
 
