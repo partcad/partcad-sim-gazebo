@@ -605,6 +605,14 @@ PENDULUM = """<?xml version="1.0"?>
 INERTIA = 1.0 * 0.5**2 + 4e-5
 
 
+# What a run says of the machine it ran on rather than of the world: a
+# subscriber Gazebo never registered, subscribed to again ('RESUBSCRIBE'), or a
+# server configuration in the home passed over ('server_config'). Any run on a
+# busy machine can say one, and none is about what the world did. The same as
+# in 'test_export_joints.py'.
+MACHINE = ("subscribed to again", "is not a Gazebo server configuration")
+
+
 @pytest.fixture(scope="module")
 def gazebo():
     try:
@@ -680,7 +688,8 @@ def test_in_gazebo_a_world_of_free_models_reports_no_joints(gazebo, tmp_path):
     assert result["before"]["joints"] == {}
     assert result["after"]["joints"] == {}
     # Nothing about joints; and, the world being written by hand, with no names
-    # beside it, why it has no loads.
-    assert result["warnings"] == [
+    # beside it, why it has no loads -- short of what a run says of the machine
+    # it ran on ('MACHINE').
+    assert [w for w in result["warnings"] if not any(phrase in w for phrase in MACHINE)] == [
         "no loads are reported: they are read for a world PartCAD exported, with its names beside it"
     ]

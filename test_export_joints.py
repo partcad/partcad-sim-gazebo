@@ -834,7 +834,8 @@ STEP = 0.001
 # 'process' in 'simulate_gazebo.py'; 'test_loads.py' is where they are under
 # test). Every scene here holds its subject to the world, which is the first.
 # The runs here are about joints and readings, and are held to warning of
-# nothing else ('_warned').
+# nothing else ('_warned') -- short of what a run says of the machine it ran on
+# ('MACHINE').
 LOADS_CAVEATS = (
     "what holds 'subject' to the world is not among its loads: Gazebo makes no force-torque sensor on a joint to the"
     " world",
@@ -845,9 +846,21 @@ LOADS_CAVEATS = (
 )
 
 
+# What a run says of the machine it ran on rather than of the world: a
+# subscriber Gazebo never registered, subscribed to again ('RESUBSCRIBE'), or a
+# server configuration in the home passed over ('server_config'). Any run on a
+# busy machine can say one, and none is about what the world did. The same as
+# in 'test_joints.py'.
+MACHINE = ("subscribed to again", "is not a Gazebo server configuration")
+
+
 def _warned(result):
-    """What a run warned of besides 'LOADS_CAVEATS'."""
-    return [warning for warning in result.get("warnings", []) if warning not in LOADS_CAVEATS]
+    """What a run warned of besides 'LOADS_CAVEATS' and 'MACHINE'."""
+    return [
+        warning
+        for warning in result.get("warnings", [])
+        if warning not in LOADS_CAVEATS and not any(phrase in warning for phrase in MACHINE)
+    ]
 
 
 def _run(module, directory, tree, physics=None, **request):
