@@ -74,6 +74,27 @@ mode = os.environ.get("FAKE_GZ_MODE", "ok")
 args = sys.argv[1:]
 
 
+def crash_without_a_core():
+    # A crash leaves its process unreaped for as long as its core takes to
+    # write, and a test that times how soon the run notices would time that
+    # instead. A soft limit of nought stops a core *file*, but not a
+    # 'core_pattern' that pipes the core to a program -- systemd-coredump on
+    # GitHub's Ubuntu runners, apport on a desktop -- which is run whatever the
+    # limit says, and took the server seconds to die there. A process that is
+    # not dumpable has no core written anywhere. Linux's word for it; another
+    # system with such a helper would want its own. A 'prctl' that fails says
+    # so rather than raising, so the fake says so and exits, rather than crash
+    # into the very wait it is here to stay out of.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    if sys.platform.startswith("linux"):
+        import ctypes
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        if libc.prctl(4, 0, 0, 0, 0) != 0:  # PR_SET_DUMPABLE, 0
+            sys.stderr.write("the fake could not make itself undumpable: errno %%d\n" %% ctypes.get_errno())
+            sys.exit(1)
+
+
 def remember(pid):
     # What it was asked, and on its next line where in gz-transport it was
     # asked it: the partition and the discovery ports it was started with.
@@ -143,7 +164,7 @@ if args[:1] == ["sim"]:
         time.sleep(0.6)
         sys.stderr.write("[Err] [Physics] the solver failed\n")
         sys.stderr.flush()
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # a crash, without a core file
+        crash_without_a_core()
         os.kill(os.getpid(), signal.SIGSEGV)
     time.sleep(600)
 elif args[:1] == ["service"]:
