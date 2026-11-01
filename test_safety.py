@@ -74,6 +74,23 @@ mode = os.environ.get("FAKE_GZ_MODE", "ok")
 args = sys.argv[1:]
 
 
+def crash_without_a_core():
+    # A crash leaves its process unreaped for as long as its core takes to
+    # write, and a test that times how soon the run notices would time that
+    # instead. A soft limit of nought stops a core *file*, but not a
+    # 'core_pattern' that pipes the core to a program -- systemd-coredump on
+    # GitHub's Ubuntu runners, apport on a desktop -- which is run whatever the
+    # limit says, and took the server seconds to die there. A process that is
+    # not dumpable has no core written anywhere.
+    resource.setrlimit(resource.RLIMIT_CORE, (0, 0))
+    try:
+        import ctypes
+
+        ctypes.CDLL(None, use_errno=True).prctl(4, 0, 0, 0, 0)  # PR_SET_DUMPABLE, 0: Linux only
+    except (AttributeError, OSError):
+        pass
+
+
 def remember(pid):
     with open(os.path.join(os.environ["FAKE_GZ_PIDS"], str(pid)), "w") as f:
         f.write(" ".join(args))
@@ -137,7 +154,7 @@ if args[:1] == ["sim"]:
         time.sleep(0.6)
         sys.stderr.write("[Err] [Physics] the solver failed\n")
         sys.stderr.flush()
-        resource.setrlimit(resource.RLIMIT_CORE, (0, 0))  # a crash, without a core file
+        crash_without_a_core()
         os.kill(os.getpid(), signal.SIGSEGV)
     time.sleep(600)
 elif args[:1] == ["service"]:
