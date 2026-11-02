@@ -607,8 +607,9 @@ publishes in another transport partition. So nothing here waits blindly:
   fails saying the world would not be set running.
 - **A first reading that does not come within `startup_timeout`** fails the
   run, saying what did come -- and, when no pose came at all, which topic it
-  listened on, in which partition and on which discovery ports: a server
-  whose joint states arrive and whose poses do not is running,
+  listened on, in which partition and, when both are set in the spelling that
+  Gazebo reads, on which discovery ports: a server whose joint states arrive
+  and whose poses do not is running,
   and has no scene broadcaster or never heard the run subscribe; pose messages
   that came with no first reading taken from them are counted, and each joint
   stream that had only a later instant to give is named.

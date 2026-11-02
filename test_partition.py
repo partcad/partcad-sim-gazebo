@@ -171,22 +171,32 @@ def test_discovery_the_user_set_up_is_left_as_it_is(name):
 def test_a_failure_says_where_the_runs_discovery_was():
     environment, _partition = sim.run_environment({}, token="abc")
 
-    said = sim.discovery_said(environment)
+    said = sim.discovery_said(environment, "/usr/bin/gz")
 
     assert said == " (discovery on ports %s and %s)" % (
         environment["GZ_DISCOVERY_MSG_PORT"],
         environment["GZ_DISCOVERY_SRV_PORT"],
     )
-    assert sim.discovery_said({}) == ""
+    assert sim.discovery_said(environment, "/usr/bin/ign") == said
+    assert sim.discovery_said({}, "/usr/bin/gz") == ""
 
 
-def test_a_failure_says_where_discovery_was_set_up_in_the_older_spelling_too():
-    """A user's 'IGN_' ports, kept for the generation that reads them, are the ones its run discovered on."""
+@pytest.mark.parametrize(
+    "spelling, server, said",
+    [
+        ("IGN", "/usr/bin/ign", " (discovery on ports 11317 and 11318)"),
+        ("GZ", "/usr/bin/gz", " (discovery on ports 11317 and 11318)"),
+        # The other generation's spelling: this run is on its defaults, not on these.
+        ("IGN", "/usr/bin/gz", ""),
+        ("GZ", "/usr/bin/ign", ""),
+    ],
+)
+def test_a_failure_names_a_users_ports_only_for_the_generation_that_reads_them(spelling, server, said):
     environment, _partition = sim.run_environment(
-        {"IGN_DISCOVERY_MSG_PORT": "11317", "IGN_DISCOVERY_SRV_PORT": "11318"}, token="abc"
+        {spelling + "_DISCOVERY_MSG_PORT": "11317", spelling + "_DISCOVERY_SRV_PORT": "11318"}, token="abc"
     )
 
-    assert sim.discovery_said(environment) == " (discovery on ports 11317 and 11318)"
+    assert sim.discovery_said(environment, server) == said
 
 
 def test_the_server_and_every_subscriber_are_started_in_it(monkeypatch, tmp_path):
