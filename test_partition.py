@@ -23,6 +23,7 @@ import math
 import os
 import socket
 import sys
+import threading
 
 import pytest
 
@@ -170,13 +171,32 @@ def test_discovery_the_user_set_up_is_left_as_it_is(name):
 def test_a_failure_says_where_the_runs_discovery_was():
     environment, _partition = sim.run_environment({}, token="abc")
 
-    said = sim.discovery_said(environment)
+    said = sim.discovery_said(environment, "/usr/bin/gz")
 
     assert said == " (discovery on ports %s and %s)" % (
         environment["GZ_DISCOVERY_MSG_PORT"],
         environment["GZ_DISCOVERY_SRV_PORT"],
     )
-    assert sim.discovery_said({}) == ""
+    assert sim.discovery_said(environment, "/usr/bin/ign") == said
+    assert sim.discovery_said({}, "/usr/bin/gz") == ""
+
+
+@pytest.mark.parametrize(
+    "spelling, server, said",
+    [
+        ("IGN", "/usr/bin/ign", " (discovery on ports 11317 and 11318)"),
+        ("GZ", "/usr/bin/gz", " (discovery on ports 11317 and 11318)"),
+        # The other generation's spelling: this run is on its defaults, not on these.
+        ("IGN", "/usr/bin/gz", ""),
+        ("GZ", "/usr/bin/ign", ""),
+    ],
+)
+def test_a_failure_names_a_users_ports_only_for_the_generation_that_reads_them(spelling, server, said):
+    environment, _partition = sim.run_environment(
+        {spelling + "_DISCOVERY_MSG_PORT": "11317", spelling + "_DISCOVERY_SRV_PORT": "11318"}, token="abc"
+    )
+
+    assert sim.discovery_said(environment, server) == said
 
 
 def test_the_server_and_every_subscriber_are_started_in_it(monkeypatch, tmp_path):
@@ -306,9 +326,27 @@ def test_in_gazebo_two_runs_of_one_world_at_once_each_report_only_themselves(gaz
 
 def test_in_gazebo_runs_at_once_each_discover_on_ports_of_their_own(gazebo, tmp_path, monkeypatch):
     """Six runs of one world side by side, as 'pc test' starts a package's simulations: each on a pair of discovery
-    ports no other run has, and each reading only its own world -- its block falling from its own height."""
+    ports no other run has, and each reading only its own world -- its block falling from its own height.
+
+    Two runs may pick one pair before either server binds it, which only shares their discovery, as every run did
+    before; that is not what is under test here, so the pairs handed out are kept distinct, each still picked and
+    probed by 'discovery_ports' itself."""
     for name in sim.DISCOVERY_VARIABLES:
         monkeypatch.delenv(name, raising=False)
+    picked = sim.discovery_ports
+    handed = set()
+    lock = threading.Lock()
+
+    def distinct(environment, token):
+        with lock:
+            for attempt in range(20):
+                pair = picked(environment, "%s-%d" % (token, attempt))
+                if pair is not None and pair not in handed:
+                    handed.add(pair)
+                    return pair
+        return None
+
+    monkeypatch.setattr(sim, "discovery_ports", distinct)
     environments = []
     started = sim.run_environment
 

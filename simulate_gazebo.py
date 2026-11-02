@@ -409,9 +409,16 @@ def _unbound(port):
     return True
 
 
-def discovery_said(environment):
-    """Where a run's discovery is, for a failure to say: its ports, when it has some of its own."""
-    topics, services = (environment.get(names[0]) for names in DISCOVERY_PORT_VARIABLES)
+def discovery_said(environment, server):
+    """Where a run's discovery is, for a failure to say: its ports, when both are set in the spelling 'server' reads.
+
+    Only that spelling. Harmonic ignores 'IGN_DISCOVERY_MSG_PORT' and stays on
+    its default, which was checked rather than assumed, so a user's 'IGN_' pair
+    is not where a 'gz' run's discovery is, and naming it would send whoever
+    reads the failure to ports nothing is on.
+    """
+    spelling = 1 if os.path.basename(server).startswith("ign") else 0
+    topics, services = (environment.get(names[spelling]) for names in DISCOVERY_PORT_VARIABLES)
     return " (discovery on ports %s and %s)" % (topics, services) if topics and services else ""
 
 
@@ -2885,7 +2892,7 @@ def process(path, request):
                     behind,
                     said.tail(0),
                     subscriptions,
-                    discovery_said(run_env),
+                    discovery_said(run_env, server),
                 )
             if deadline.passed():
                 return (
