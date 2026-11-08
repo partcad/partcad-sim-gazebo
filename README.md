@@ -427,7 +427,7 @@ reports them beside the result:
 {"snapshots": {"before": "snapshot-before.png", "after": "snapshot-after.png"}}
 ```
 
-They are what the PartCAD IDE's **Validation → Simulation** tab shows side by
+They are what the PartCAD IDE's **Qualification → Simulation** tab shows side by
 side, and `pc qual test --simulation` says where they were written.
 
 They are the world file Gazebo ran, each visual placed where Gazebo's pose
@@ -471,7 +471,7 @@ beside the snapshots, and is reported as
 {"video": "video.webm"}
 ```
 
-It is what the IDE's **Validation → Simulation** tab plays, with the before
+It is what the IDE's **Qualification → Simulation** tab plays, with the before
 and after pictures as the still it shows until it is played.
 
 Drawing the frames is a few seconds for a small world, on up to four threads,
