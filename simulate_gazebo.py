@@ -11,7 +11,7 @@ The world arrives as SDFormat -- PartCAD exported it with this package's own
 exporter, with every free body free to move and the joints of every mechanism in
 it -- so all this does is start the server, watch the poses it publishes, and
 take the same reading twice: once before anything has moved and once when the
-simulated clock reaches ``duration``. That pair is what a ``simulate:``'s
+simulated clock reaches ``duration``. That pair is what a ``qual: sim:`` entry's
 ``validation:`` expression is handed, and it is the whole of what PartCAD
 requires a simulation plugin to produce.
 
@@ -283,11 +283,11 @@ def run_environment(environment=None, token=None):
     and answers come from every process in the same *partition* -- which, unless
     something says otherwise, is one per user per machine. A topic is named
     after the world ('/world/<name>/pose/info'), and the world after the scene,
-    so two runs of one simulation at once -- 'pc test' running the simulations
-    of a package side by side, or a 'pc sim' beside it -- are two servers
-    publishing on the same topic, and each run's subscriber hears both. Nothing
-    fails: the readings interleave, and a validation passes or fails on poses
-    that were never its own.
+    so two runs of one simulation at once -- 'pc qual test' running the
+    simulations of a package side by side, or a 'pc qual test --simulation'
+    beside it -- are two servers publishing on the same topic, and each run's
+    subscriber hears both. Nothing fails: the readings interleave, and a
+    validation passes or fails on poses that were never its own.
 
     So every run gets a partition of its own, and the server and every client
     that reads from it are started in it. Named by a random token, not by
@@ -505,9 +505,9 @@ def server_config(environment, server, warnings):
     then filled. A second server started at the same moment finds it there,
     reads nothing, writes "No <server_config> element found when parsing
     plugins", and runs with no systems at all: paused, alive, and publishing
-    no pose, ever. A 'pc test' starts a package's simulations together, and
-    in a fresh home -- every CI job's -- that is how one or two of the first
-    of them hung for the whole of their 'startup_timeout'.
+    no pose, ever. A 'pc qual test' starts a package's simulations together,
+    and in a fresh home -- every CI job's -- that is how one or two of the
+    first of them hung for the whole of their 'startup_timeout'.
 
     So where that copy is not there, the server is pointed at the installed
     configuration itself, which it reads where it is: what Gazebo would have
@@ -1068,12 +1068,12 @@ def world_gravity(path, gravity=None):
     """The gravity the world in 'path' runs under, in m/s^2 -- made 'gravity' first, if one is given.
 
     The world arrives with the scene's gravity in it, or with none, which is
-    Gazebo's own. 'gravity' is what a 'simulate:' passed in 'params' for this
-    one run, and it is the explicit answer that beats the scene's -- so it is
-    written into the file Gazebo is about to load, which is also the file the
-    snapshots are drawn from and the run directory keeps. This package's
-    declaration states no default for it, deliberately: a default would be
-    passed in every request and replace every scene's.
+    Gazebo's own. 'gravity' is what a 'qual: sim:' entry passed in 'params'
+    for this one run, and it is the explicit answer that beats the scene's --
+    so it is written into the file Gazebo is about to load, which is also the
+    file the snapshots are drawn from and the run directory keeps. This
+    package's declaration states no default for it, deliberately: a default
+    would be passed in every request and replace every scene's.
 
     What is returned is what the run will actually be under, which is what the
     result reports -- not what was asked for, which is the same number or is
@@ -2703,11 +2703,11 @@ def process(path, request):
 
     PartCAD's simulation entry point (see the docstring of this module, and
     'wrapper_simulate' in PartCAD): 'path' is the directory a run may write
-    its snapshots into, and 'request' what PartCAD and the 'simulate:' ask
-    for -- 'duration', 'samples', 'timeout', 'startup_timeout', 'loads' and
-    the rest of the parameters 'partcad.yaml' lists. Returns the result
-    PartCAD hands a validation; raises, saying what happened, for a run that
-    could not be made.
+    its snapshots into, and 'request' what PartCAD and the 'qual: sim:'
+    entry ask for -- 'duration', 'samples', 'timeout', 'startup_timeout',
+    'loads' and the rest of the parameters 'partcad.yaml' lists. Returns the
+    result PartCAD hands a validation; raises, saying what happened, for a
+    run that could not be made.
     """
     started = time.monotonic()
     (server, server_args, topic_command), environment = locate_gazebo()
@@ -2730,8 +2730,8 @@ def process(path, request):
     shown = names.world(world)
     warnings = []
     # Whether every reading says what acts on each body (see 'fill_loads'):
-    # yes, unless the 'simulate:' asked for nothing but poses -- and only for a
-    # world PartCAD exported, whose sidecar places each body in the world.
+    # yes, unless the 'qual: sim:' entry asked for nothing but poses -- and only
+    # for a world PartCAD exported, whose sidecar places each body in the world.
     loads = request.get("loads", True) is not False
     if loads and not names.bodies:
         note(warnings, "no loads are reported: they are read for a world PartCAD exported, with its names beside it")

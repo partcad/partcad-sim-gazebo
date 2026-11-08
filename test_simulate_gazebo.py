@@ -303,7 +303,7 @@ def test_a_world_whose_gravity_is_not_three_numbers_is_named(tmp_path):
 
 
 def test_a_gravity_the_simulation_is_handed_beats_the_scenes_and_is_what_gazebo_loads(tmp_path):
-    """'params: {gravity: ...}' on a 'simulate:' is the explicit, per-run answer.
+    """'params: {gravity: ...}' on a 'qual: sim:' entry is the explicit, per-run answer.
 
     Written into the world rather than only reported: the report used to say
     whatever the request said while Gazebo ran under the file's.

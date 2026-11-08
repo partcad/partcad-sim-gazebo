@@ -19,19 +19,20 @@ scenes:
 assemblies:
   stack:
     type: assy
-    simulate:
-      stands:
-        simulation: sim-gazebo:gazebo
-        offset: [[0, 0, 10], [0, 0, 1], 0]
-        validation: |
-          max(
-              abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
-              for name in before["bodies"]
-          ) < 2.0
+    qual:
+      sim:
+        stands:
+          path: sim-gazebo:gazebo
+          offset: [[0, 0, 10], [0, 0, 1], 0]
+          validation: |
+            max(
+                abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
+                for name in before["bodies"]
+            ) < 2.0
 ```
 
 ```console
-$ pc sim -a stack
+$ pc qual test --simulation -a stack
 INFO: //your/package:stack: the simulation 'stands' validated
 ```
 
@@ -109,7 +110,7 @@ taken at, read out of the message; `after` is the first one at or past
 
 Every run has a Gazebo transport **partition** of its own, and the server and
 everything that reads from it are started in it. Gazebo names its topics after
-the world, so two runs of one simulation at once — `pc test` running a
+the world, so two runs of one simulation at once — `pc qual test` running a
 package's simulations side by side, say — are two servers on the same topics,
 and in one partition each run would hear both: nothing fails, and a validation
 is handed poses that were not its own. A `GZ_PARTITION` you have set (or
@@ -427,7 +428,7 @@ reports them beside the result:
 ```
 
 They are what the PartCAD IDE's **Validation → Simulation** tab shows side by
-side, and `pc sim` says where they were written.
+side, and `pc qual test --simulation` says where they were written.
 
 They are the world file Gazebo ran, each visual placed where Gazebo's pose
 messages say its model and its link were at the first reading and at the last,
@@ -519,7 +520,7 @@ writes.
 ## Parameters
 
 Set any of these as fields of the simulation (per package), or in the `params:`
-of one `simulate:` entry (per simulation).
+of one `qual: sim:` entry (per simulation).
 
 | Parameter | Default | What it is |
 | --- | --- | --- |
@@ -560,7 +561,7 @@ publishes in another transport partition. So nothing here waits blindly:
   pose comes from. Gazebo keeps that configuration in
   `~/.gz/sim/<release>/server.config`, copying the installed one there the
   first time a server starts, in place: the file exists, empty, before its
-  content is in it. A second server started at that moment -- `pc test`
+  content is in it. A second server started at that moment -- `pc qual test`
   starting a package's simulations together in a home Gazebo has not written
   to yet, which is every CI job's first -- reads it empty and runs paused,
   alive, and publishing nothing, and the run used to wait its whole
@@ -671,7 +672,7 @@ material (`//pub/std/manufacturing/material/fluid:water`).
 
 **Gravity** is the world's `<gravity>`. A scene that states none gets no
 `<gravity>` element, so Gazebo applies SDFormat's own `[0, 0, -9.8]` exactly as
-it always did. Which one a run uses is, in order: a `simulate:`'s own
+it always did. Which one a run uses is, in order: a `qual: sim:` entry's own
 `params: {gravity: ...}`, written into the world before Gazebo loads it; the
 scene's; SDFormat's. An explicit `gravity` on the `world` export does the same
 for a file written with `pc export`. Neither this package's export nor its
