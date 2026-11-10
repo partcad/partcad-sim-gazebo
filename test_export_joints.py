@@ -8,8 +8,9 @@
 The trees here are the ones PartCAD itself builds: a small package of cubes and
 two interfaces, a 'motion:' on one of them, composed by PartCAD's own ASSY code
 -- with a stand-in for every part's geometry, so nothing needs a CAD kernel --
-and handed to the exporter the way 'pc export' and 'pc sim' hand it over. The
-same trees the MJCF exporter of partcad-sim-mujoco is tested on.
+and handed to the exporter the way 'pc export' and 'pc qual test --simulation'
+hand it over. The same trees the MJCF exporter of partcad-sim-mujoco is
+tested on.
 
 What is checked, each against an answer that does not come from the exporter:
 
@@ -864,7 +865,8 @@ def _warned(result):
 
 
 def _run(module, directory, tree, physics=None, **request):
-    """'tree' exported as a run exports it, and run in Gazebo: what 'pc sim' hands the validation."""
+    """'tree' exported as a run exports it, and run in Gazebo: what 'pc qual test --simulation' hands the
+    validation."""
     import simulate_gazebo
 
     _result, path, _sdf = module_export(module, directory, tree, physics)

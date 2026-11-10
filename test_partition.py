@@ -325,8 +325,8 @@ def test_in_gazebo_two_runs_of_one_world_at_once_each_report_only_themselves(gaz
 
 
 def test_in_gazebo_runs_at_once_each_discover_on_ports_of_their_own(gazebo, tmp_path, monkeypatch):
-    """Six runs of one world side by side, as 'pc test' starts a package's simulations: each on a pair of discovery
-    ports no other run has, and each reading only its own world -- its block falling from its own height.
+    """Six runs of one world side by side, as 'pc qual test' starts a package's simulations: each on a pair of
+    discovery ports no other run has, and each reading only its own world -- its block falling from its own height.
 
     Two runs may pick one pair before either server binds it, which only shares their discovery, as every run did
     before; that is not what is under test here, so the pairs handed out are kept distinct, each still picked and

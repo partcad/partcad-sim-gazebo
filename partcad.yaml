@@ -75,18 +75,18 @@ docs:
     as a PartCAD scene, so a world somebody else wrote is a scene you can place
     parts in, and a scene you built out of parts is a world Gazebo can run.
 
-    `pc sim` runs one under gravity and reports where every model ended up, so
-    that a part or an assembly can state what it is supposed to do -- or not do
-    -- and have that checked. `before` and `after` each carry `time` and a
-    `bodies` object: one entry per body, under PartCAD's name for it, holding
-    its position `pos` and its orientation `quat` (`w x y z`) in the world's
-    frame -- a link hanging off a mechanism's root as much as a model standing
-    free. A scene called `world`, which is what PartCAD's default world is, is
-    still `world` in what a run reports, although SDFormat reserves the name and
-    the file calls it something else. Positions are in **millimetres**, PartCAD's
-    unit everywhere, not the metres SDFormat works in -- a validation expression
-    is written by whoever wrote the part, against the numbers that part is drawn
-    in.
+    `pc qual test --simulation` runs one under gravity and reports where every
+    model ended up, so that a part or an assembly can state what it is supposed
+    to do -- or not do -- and have that checked. `before` and `after` each carry
+    `time` and a `bodies` object: one entry per body, under PartCAD's name for
+    it, holding its position `pos` and its orientation `quat` (`w x y z`) in the
+    world's frame -- a link hanging off a mechanism's root as much as a model
+    standing free. A scene called `world`, which is what PartCAD's default world
+    is, is still `world` in what a run reports, although SDFormat reserves the
+    name and the file calls it something else. Positions are in **millimetres**,
+    PartCAD's unit everywhere, not the metres SDFormat works in -- a validation
+    expression is written by whoever wrote the part, against the numbers that
+    part is drawn in.
 
     Beside `bodies`, each reading carries a `joints` object: one entry per
     PartCAD joint, under PartCAD's name for it, in the vocabulary
@@ -153,9 +153,9 @@ docs:
 
     A scene's `gravity:` (m/s^2) is the world's `<gravity>`; a scene that
     states none gets none, and Gazebo's own `[0, 0, -9.8]`. A run's gravity is,
-    in order: `params: {gravity: ...}` on the `simulate:`, the scene's, then
-    SDFormat's -- neither the export nor the simulation below states a default,
-    because one would beat every scene.
+    in order: `params: {gravity: ...}` on the `qual: sim:` entry, the scene's,
+    then SDFormat's -- neither the export nor the simulation below states a
+    default, because one would beat every scene.
 
     A scene's `medium:` -- the fluid it is filled with -- is **not** modelled
     here, and the export warns rather than pretending. Gazebo's buoyancy system
@@ -180,19 +180,20 @@ docs:
     assemblies:
       stack:
         type: assy
-        simulate:
-          stands:
-            simulation: sim-gazebo:gazebo
-            offset: [[0, 0, 10], [0, 0, 1], 0]
-            validation: |
-              max(
-                  abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
-                  for name in before["bodies"]
-              ) < 2.0
+        qual:
+          sim:
+            stands:
+              path: sim-gazebo:gazebo
+              offset: [[0, 0, 10], [0, 0, 1], 0]
+              validation: |
+                max(
+                    abs(after["bodies"][name]["pos"][2] - before["bodies"][name]["pos"][2])
+                    for name in before["bodies"]
+                ) < 2.0
     ```
 
     ```shell
-    pc sim -a stack                         # run it and check the validation
+    pc qual test --simulation -a stack      # run it and check the validation
     pc export -t sim-gazebo:world -S warehouse   # write the scene back out
     pc ide open --with gazebo warehouse.world   # and look at it
     ```
@@ -307,7 +308,7 @@ import:
       rather than one product, so it is a scene and never an assembly.
 
       Reading a world is not running one: this is XML and arithmetic, and no
-      Gazebo installation is involved. Running it is `pc sim`.
+      Gazebo installation is involved. Running it is `pc qual test --simulation`.
     path: import_world.py
     extension: world
     kinds: [scene]
@@ -411,13 +412,14 @@ simulation:
     # loads it. No default, for the reason the export above has none: the world
     # already carries the scene's gravity, and a default here would replace it
     # in every run. (It also used to be reported as what the run was under
-    # without ever reaching Gazebo, which applied SDFormat's 9.8.) A `simulate:`
-    # that wants another for one run says `params: {gravity: [0, 0, -1.62]}`.
+    # without ever reaching Gazebo, which applied SDFormat's 9.8.) A
+    # `qual: sim:` entry that wants another for one run says
+    # `params: {gravity: [0, 0, -1.62]}`.
     # gravity: [0.0, 0.0, -9.81]
     #
     # How long the whole run may take, in wall-clock seconds. Not stated here,
     # so that it is PartCAD's to work out: the larger of five minutes and ten
-    # seconds for each simulated one, unless a 'simulate:' says
+    # seconds for each simulated one, unless a 'qual: sim:' entry says
     # 'params: {timeout: ...}' (or the machine says 'simulation.timeout').
     # PartCAD hands it to the script as 'timeout' and stops the run when it is
     # spent; the script stops itself a little before, saying how far it got.
